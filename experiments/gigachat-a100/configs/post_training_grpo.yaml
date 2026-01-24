@@ -1,0 +1,133 @@
+# GigaChat3-10B-A1.8B Post-Training (GRPO) Configuration
+# Group Relative Policy Optimization - современный метод RL для LLM
+
+# Модель
+model:
+  name: "./outputs/gigachat-mid-training/final"
+  dtype: "bfloat16"
+  trust_remote_code: true
+
+# GRPO конфигурация
+grpo:
+  # Основные параметры
+  beta: 0.04                    # KL penalty
+  num_generations: 4            # Количество генераций на промпт
+  max_new_tokens: 2048
+
+  # Temperature для генерации
+  temperature: 0.7
+  top_p: 0.9
+
+  # Reward модель
+  use_reward_model: true
+  reward_model_path: "./outputs/reward_model"
+
+  # Альтернатива: rule-based rewards
+  rule_based_rewards:
+    enabled: true
+    weights:
+      task_completion: 1.0
+      format_compliance: 0.5
+      tool_efficiency: 0.3
+      safety_bonus: 0.2
+
+# Конфигурация обучения
+training:
+  output_dir: "./outputs/gigachat-post-training-grpo"
+  num_train_epochs: 1
+  max_steps: 1000
+
+  # Batch size
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+
+  # Оптимизатор
+  optim: "adamw_torch_fused"
+  learning_rate: 1.0e-6
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+
+  # Scheduler
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.1
+
+  # Precision
+  bf16: true
+  gradient_checkpointing: true
+
+  # vLLM для быстрой генерации
+  use_vllm: true
+  vllm_config:
+    gpu_memory_utilization: 0.6
+    tensor_parallel_size: 1
+
+  # Logging
+  logging_steps: 5
+  save_steps: 100
+
+# Данные
+data:
+  train_file: "data/grpo_prompts.jsonl"
+  max_prompt_length: 2048
+
+# Reward функции для агентного поведения
+reward_functions:
+  # Проверка успешного выполнения задачи
+  task_completion:
+    type: "execution_based"
+    sandbox: true
+    timeout: 30
+    success_reward: 1.0
+    failure_reward: -0.5
+
+  # Проверка формата tool calls
+  format_compliance:
+    type: "regex_based"
+    patterns:
+      - name: "json_valid"
+        pattern: "^\\{.*\\}$"
+        reward: 0.2
+      - name: "tool_name_valid"
+        pattern: "\"name\":\\s*\"[a-z_]+\""
+        reward: 0.1
+
+  # Эффективность (меньше шагов = лучше)
+  efficiency:
+    type: "length_based"
+    optimal_steps: 3
+    penalty_per_extra_step: 0.05
+    max_penalty: 0.5
+
+  # Safety checks
+  safety:
+    type: "blocklist_based"
+    forbidden_patterns:
+      - "rm -rf /"
+      - "sudo"
+      - "password"
+    penalty: -1.0
+
+# LoRA
+lora:
+  enabled: true
+  r: 16
+  lora_alpha: 32
+  target_modules:
+    - "q_proj"
+    - "v_proj"
+
+# Hardware
+hardware:
+  device: "cuda"
+  gpu_type: "A100-80GB"
+  num_gpus: 1
+
+# Wandb
+wandb:
+  project: "gigachat-agentic-posttraining"
+  run_name: "gigachat-10b-grpo-v1"
+  tags:
+    - "post-training"
+    - "grpo"
+    - "rl"
+    - "agentic"

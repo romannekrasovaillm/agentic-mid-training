@@ -1,0 +1,141 @@
+# GigaChat3-10B-A1.8B Mid-Training Configuration
+# Оптимизировано для NVIDIA A100 80GB
+
+# Модель
+model:
+  name: "ai-sage/GigaChat3-10B-A1.8B"
+  dtype: "bfloat16"
+  trust_remote_code: true
+  use_flash_attention_2: true
+
+# Архитектура (MoE - Mixture of Experts)
+architecture:
+  total_params: "10B"
+  active_params: "1.8B"
+  attention_type: "MLA"  # Multi-head Latent Attention
+  features:
+    - "multi_token_prediction"
+    - "speculative_decoding"
+
+# Конфигурация обучения
+training:
+  # Основные параметры
+  output_dir: "./outputs/gigachat-mid-training"
+  num_train_epochs: 3
+  max_steps: -1
+
+  # Batch size для A100 80GB
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 8
+  effective_batch_size: 32  # 4 * 8 = 32
+
+  # Оптимизатор
+  optim: "adamw_torch_fused"
+  learning_rate: 2.0e-5
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_epsilon: 1.0e-8
+  max_grad_norm: 1.0
+
+  # Learning rate scheduler
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.1
+  warmup_steps: 100
+
+  # Precision
+  bf16: true
+  fp16: false
+  tf32: true
+
+  # Memory optimization
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+
+  # Logging
+  logging_steps: 10
+  logging_first_step: true
+  save_steps: 500
+  save_total_limit: 3
+  eval_steps: 500
+  evaluation_strategy: "steps"
+
+  # DeepSpeed
+  deepspeed: "configs/deepspeed_zero2.json"
+
+# Data Mixing для агентного mid-training
+# Согласно документации: 40-50% агентных данных, 20-30% код
+data_mixing:
+  agent_traces: 0.45       # Цепочки рассуждений, tool use
+  code: 0.25               # Программный код
+  reasoning: 0.15          # Математика, логика
+  general_text: 0.10       # Качественный текст
+  function_calling: 0.05   # Примеры function calling
+
+# Конфигурация данных
+data:
+  train_file: "data/train.jsonl"
+  validation_file: "data/validation.jsonl"
+  max_seq_length: 8192
+  preprocessing_num_workers: 16
+
+  # Формат данных
+  chat_template: "gigachat"
+  add_special_tokens: true
+
+  # Агентные данные
+  agent_data:
+    include_tool_calls: true
+    include_observations: true
+    include_reasoning_traces: true
+    max_tool_calls_per_sample: 10
+
+# LoRA конфигурация (для эффективного обучения)
+lora:
+  enabled: true
+  r: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+# A100-специфичные оптимизации
+hardware:
+  device: "cuda"
+  gpu_type: "A100-80GB"
+  num_gpus: 1
+
+  # Memory management
+  max_memory_mb: 75000  # Оставляем запас
+  empty_cache_steps: 100
+
+  # CUDA оптимизации
+  cuda_settings:
+    CUDA_VISIBLE_DEVICES: "0"
+    PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:512"
+    NCCL_P2P_DISABLE: "0"
+
+# Checkpoint
+checkpoint:
+  resume_from_checkpoint: null
+  save_safetensors: true
+
+# Wandb logging
+wandb:
+  project: "gigachat-agentic-midtraining"
+  run_name: "gigachat-10b-mid-v1"
+  log_model: false
+  tags:
+    - "mid-training"
+    - "agentic"
+    - "A100"

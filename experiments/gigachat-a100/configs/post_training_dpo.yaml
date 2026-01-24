@@ -1,0 +1,119 @@
+# GigaChat3-10B-A1.8B Post-Training (DPO) Configuration
+# Direct Preference Optimization для агентного поведения
+
+# Модель
+model:
+  # Используем модель после mid-training
+  name: "./outputs/gigachat-mid-training/final"
+  # Или базовую модель:
+  # name: "ai-sage/GigaChat3-10B-A1.8B"
+  dtype: "bfloat16"
+  trust_remote_code: true
+
+# Reference модель (для DPO)
+ref_model:
+  name: "ai-sage/GigaChat3-10B-A1.8B"  # Оригинальная модель
+  dtype: "bfloat16"
+
+# DPO конфигурация
+dpo:
+  beta: 0.1                    # KL penalty coefficient
+  loss_type: "sigmoid"         # sigmoid, hinge, ipo
+  label_smoothing: 0.0
+  reference_free: false
+
+  # Генерация preference данных
+  generate_during_training: false
+
+  # RPO (Reference Policy Optimization) настройки
+  rpo_alpha: null  # Если null, используется стандартный DPO
+
+# Конфигурация обучения
+training:
+  output_dir: "./outputs/gigachat-post-training-dpo"
+  num_train_epochs: 1
+  max_steps: 2000
+
+  # Batch size (меньше из-за двух моделей в памяти)
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 16
+  effective_batch_size: 32
+
+  # Оптимизатор
+  optim: "adamw_torch_fused"
+  learning_rate: 5.0e-7  # Низкий LR для DPO
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+
+  # Scheduler
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.1
+
+  # Precision
+  bf16: true
+  gradient_checkpointing: true
+
+  # Logging
+  logging_steps: 10
+  save_steps: 200
+  eval_steps: 200
+
+  # DeepSpeed
+  deepspeed: "configs/deepspeed_zero3.json"
+
+# Данные для preference learning
+data:
+  # Формат: {"prompt": ..., "chosen": ..., "rejected": ...}
+  train_file: "data/preferences_train.jsonl"
+  validation_file: "data/preferences_val.jsonl"
+  max_length: 4096
+  max_prompt_length: 2048
+
+  # Preprocessing
+  preprocessing_num_workers: 8
+
+# Preference данные для агентного поведения
+preference_criteria:
+  # Критерии "хорошего" агентного поведения
+  chosen_criteria:
+    - "correct_tool_selection"      # Правильный выбор инструмента
+    - "efficient_reasoning"         # Эффективные рассуждения
+    - "error_recovery"             # Восстановление после ошибок
+    - "task_completion"            # Завершение задачи
+    - "json_format_compliance"     # Соответствие формату
+
+  rejected_criteria:
+    - "hallucinated_tools"         # Выдуманные инструменты
+    - "infinite_loops"             # Бесконечные циклы
+    - "premature_termination"      # Преждевременная остановка
+    - "format_violations"          # Нарушения формата
+    - "unsafe_actions"             # Небезопасные действия
+
+# LoRA (для эффективности)
+lora:
+  enabled: true
+  r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+
+# Hardware
+hardware:
+  device: "cuda"
+  gpu_type: "A100-80GB"
+  num_gpus: 1
+  max_memory_mb: 70000
+
+# Wandb
+wandb:
+  project: "gigachat-agentic-posttraining"
+  run_name: "gigachat-10b-dpo-v1"
+  tags:
+    - "post-training"
+    - "dpo"
+    - "agentic"
