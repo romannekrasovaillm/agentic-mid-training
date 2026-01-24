@@ -185,35 +185,42 @@ def prepare_dataset(data_args: DataArguments, tokenizer):
     logger.info("Загрузка и подготовка датасета...")
 
     from datasets import Dataset, DatasetDict
+    import json
 
     # Загрузка из HuggingFace Hub или локальных файлов
     if data_args.dataset_name:
         logger.info(f"Загрузка датасета из HuggingFace Hub: {data_args.dataset_name}")
 
-        # Используем streaming для обхода проблем со схемой
-        logger.info("Используем streaming для загрузки...")
-        # Nemotron имеет splits: interactive_agent, tool_calling
+        # Загружаем файл напрямую через huggingface_hub (обходим проблемы с типами)
+        from huggingface_hub import hf_hub_download
+
         split_name = data_args.dataset_config or "tool_calling"
-        logger.info(f"Используем split: {split_name}")
-        streaming_dataset = load_dataset(
-            data_args.dataset_name,
-            split=split_name,
-            streaming=True,
-            trust_remote_code=True,
+        logger.info(f"Загрузка split: {split_name}")
+
+        # Скачиваем файл
+        file_path = hf_hub_download(
+            repo_id=data_args.dataset_name,
+            filename=f"data/{split_name}.jsonl",
+            repo_type="dataset",
         )
 
-        # Собираем данные в список, берём только messages
+        # Парсим JSONL вручную
         samples = []
-        max_samples = data_args.max_train_samples or 50000  # По умолчанию 50K
+        max_samples = data_args.max_train_samples or 50000
 
-        logger.info(f"Загрузка до {max_samples} примеров...")
-        for i, example in enumerate(streaming_dataset):
-            if i >= max_samples:
-                break
-            if "messages" in example:
-                samples.append({"messages": example["messages"]})
-            if (i + 1) % 5000 == 0:
-                logger.info(f"Загружено {i + 1} примеров...")
+        logger.info(f"Загрузка до {max_samples} примеров из {file_path}...")
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for i, line in enumerate(f):
+                if i >= max_samples:
+                    break
+                try:
+                    example = json.loads(line.strip())
+                    if "messages" in example:
+                        samples.append({"messages": example["messages"]})
+                except json.JSONDecodeError:
+                    continue
+                if (i + 1) % 5000 == 0:
+                    logger.info(f"Загружено {i + 1} примеров...")
 
         logger.info(f"Загружено {len(samples)} примеров")
 
