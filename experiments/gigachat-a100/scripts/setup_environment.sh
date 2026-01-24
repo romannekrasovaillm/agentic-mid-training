@@ -79,8 +79,10 @@ install_dependencies() {
     # DeepSpeed
     pip install deepspeed>=0.15.0
 
-    # Flash Attention 2
-    pip install flash-attn --no-build-isolation
+    # Flash Attention 2 - требует предустановленных build зависимостей
+    echo -e "${YELLOW}Установка Flash Attention 2 (может занять несколько минут)...${NC}"
+    pip install wheel setuptools packaging ninja
+    MAX_JOBS=4 pip install flash-attn --no-build-isolation
 
     echo -e "${GREEN}Основные зависимости установлены!${NC}"
 }
