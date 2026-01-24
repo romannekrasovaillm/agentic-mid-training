@@ -94,12 +94,13 @@ class PipelineConfig:
     output_dir: str = "./outputs/gigachat-pipeline"
     cache_dir: str = "./cache"
 
-    # Mid-training (оптимизировано для H100 80GB)
+    # Mid-training (оптимизировано для H100 80GB с gradient checkpointing)
     mid_training_epochs: int = 1
     mid_training_lr: float = 2e-5
-    mid_training_batch_size: int = 4  # H100 может больше
-    mid_training_grad_accum: int = 4
+    mid_training_batch_size: int = 2  # Уменьшено из-за OOM
+    mid_training_grad_accum: int = 8  # Компенсируем меньший batch
     mid_training_max_samples: int = 1000
+    gradient_checkpointing: bool = True  # Экономит память
 
     # RLVR
     rlvr_epochs: int = 1
@@ -120,7 +121,7 @@ class PipelineConfig:
     # Data
     dataset_name: str = "nvidia/Nemotron-Agentic-v1"
     dataset_split: str = "tool_calling"
-    max_seq_length: int = 2048
+    max_seq_length: int = 1024  # Уменьшено для экономии памяти
 
     # Training
     warmup_ratio: float = 0.1
@@ -368,6 +369,11 @@ def apply_lora(model, config: PipelineConfig, logger):
 
     model.enable_input_require_grads()
     model = get_peft_model(model, lora_config)
+
+    # Gradient checkpointing для экономии памяти
+    if config.gradient_checkpointing:
+        logger.info("Включение gradient checkpointing...")
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     # Статистика
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
