@@ -62,8 +62,8 @@ training:
   eval_steps: 500
   evaluation_strategy: "steps"
 
-  # DeepSpeed
-  deepspeed: "configs/deepspeed_zero2.json"
+  # DeepSpeed (отключен для single GPU - не нужен с LoRA)
+  # deepspeed: "configs/deepspeed_zero2.json"
 
 # Data Mixing для агентного mid-training
 # Согласно документации: 40-50% агентных данных, 20-30% код
