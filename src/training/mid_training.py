@@ -192,9 +192,12 @@ def prepare_dataset(data_args: DataArguments, tokenizer):
 
         # Используем streaming для обхода проблем со схемой
         logger.info("Используем streaming для загрузки...")
+        # Nemotron имеет splits: interactive_agent, tool_calling
+        split_name = data_args.dataset_config or "tool_calling"
+        logger.info(f"Используем split: {split_name}")
         streaming_dataset = load_dataset(
             data_args.dataset_name,
-            split="train",
+            split=split_name,
             streaming=True,
             trust_remote_code=True,
         )
