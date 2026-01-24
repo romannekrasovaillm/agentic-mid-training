@@ -204,7 +204,7 @@ def prepare_dataset(data_args: DataArguments, tokenizer):
             repo_type="dataset",
         )
 
-        # Парсим JSONL вручную
+        # Парсим JSONL вручную и сразу конвертируем в текст
         samples = []
         max_samples = data_args.max_train_samples or 50000
 
@@ -216,7 +216,8 @@ def prepare_dataset(data_args: DataArguments, tokenizer):
                 try:
                     example = json.loads(line.strip())
                     if "messages" in example:
-                        samples.append({"messages": example["messages"]})
+                        # Сохраняем messages как JSON-строку для избежания проблем с типами
+                        samples.append({"messages_json": json.dumps(example["messages"], ensure_ascii=False)})
                 except json.JSONDecodeError:
                     continue
                 if (i + 1) % 5000 == 0:
@@ -259,8 +260,22 @@ def prepare_dataset(data_args: DataArguments, tokenizer):
         """Токенизация примеров"""
         texts = []
 
-        for i in range(len(examples["messages"])):
-            messages = examples["messages"][i]
+        # Определяем ключ для messages
+        if "messages_json" in examples:
+            messages_key = "messages_json"
+            is_json = True
+        else:
+            messages_key = "messages"
+            is_json = False
+
+        for i in range(len(examples[messages_key])):
+            messages_data = examples[messages_key][i]
+
+            # Парсим JSON если нужно
+            if is_json:
+                messages = json.loads(messages_data)
+            else:
+                messages = messages_data
 
             # Преобразуем Nemotron формат если нужно
             if messages and isinstance(messages[0], dict):
@@ -276,7 +291,7 @@ def prepare_dataset(data_args: DataArguments, tokenizer):
                 )
             except Exception as e:
                 # Fallback: простая конкатенация
-                text = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+                text = "\n".join([f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages])
 
             texts.append(text)
 
