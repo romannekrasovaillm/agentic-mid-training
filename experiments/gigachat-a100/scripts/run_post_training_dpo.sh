@@ -20,7 +20,7 @@ if [ -d "./venv" ]; then
 fi
 
 export CUDA_VISIBLE_DEVICES=0
-export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:256"
+export PYTORCH_ALLOC_CONF="max_split_size_mb:256"
 export WANDB_PROJECT="gigachat-agentic-posttraining"
 
 python -c "import torch; torch.cuda.empty_cache()" 2>/dev/null || true

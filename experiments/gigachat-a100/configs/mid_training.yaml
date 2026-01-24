@@ -120,7 +120,7 @@ hardware:
   # CUDA оптимизации
   cuda_settings:
     CUDA_VISIBLE_DEVICES: "0"
-    PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+    PYTORCH_ALLOC_CONF: "expandable_segments:True"
     NCCL_P2P_DISABLE: "0"
 
 # Checkpoint
