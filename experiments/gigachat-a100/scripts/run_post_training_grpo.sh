@@ -30,7 +30,7 @@ echo "Запуск GRPO Training..."
 accelerate launch \
     --mixed_precision bf16 \
     --num_processes 1 \
-    ../../../src/training/grpo_training.py \
+    ../../src/training/grpo_training.py \
     --config "${CONFIG_PATH}"
 
 echo "=========================================="

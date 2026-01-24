@@ -30,7 +30,7 @@ echo "Запуск DPO Training..."
 accelerate launch \
     --mixed_precision bf16 \
     --num_processes 1 \
-    ../../../src/training/dpo_training.py \
+    ../../src/training/dpo_training.py \
     --config "${CONFIG_PATH}"
 
 echo "=========================================="

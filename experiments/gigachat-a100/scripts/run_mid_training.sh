@@ -42,7 +42,7 @@ accelerate launch \
     --num_processes 1 \
     --num_machines 1 \
     --dynamo_backend no \
-    ../../../src/training/mid_training.py \
+    ../../src/training/mid_training.py \
     --config "${CONFIG_PATH}"
 
 echo "=========================================="

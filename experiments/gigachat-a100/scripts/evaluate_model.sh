@@ -30,7 +30,7 @@ lm_eval \
 # Агентная оценка (кастомные метрики)
 echo "Запуск агентной оценки..."
 
-python ../../../src/evaluation/agent_eval.py \
+python ../../src/evaluation/agent_eval.py \
     --model_path "${MODEL_PATH}" \
     --output_dir "${OUTPUT_DIR}/agent_eval"
 
