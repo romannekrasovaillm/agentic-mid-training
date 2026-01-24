@@ -47,7 +47,7 @@ setup_venv() {
     fi
 
     source $VENV_PATH/bin/activate
-    pip install --upgrade pip
+    pip install --upgrade pip setuptools wheel
 }
 
 # Установка PyTorch с CUDA
