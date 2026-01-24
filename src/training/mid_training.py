@@ -187,21 +187,37 @@ def prepare_dataset(data_args: DataArguments, tokenizer):
     # Загрузка из HuggingFace Hub или локальных файлов
     if data_args.dataset_name:
         logger.info(f"Загрузка датасета из HuggingFace Hub: {data_args.dataset_name}")
-        if data_args.dataset_config:
+        try:
+            if data_args.dataset_config:
+                raw_datasets = load_dataset(
+                    data_args.dataset_name,
+                    data_args.dataset_config,
+                    trust_remote_code=True,
+                )
+            else:
+                raw_datasets = load_dataset(
+                    data_args.dataset_name,
+                    trust_remote_code=True,
+                )
+        except Exception as e:
+            logger.warning(f"Ошибка загрузки полного датасета: {e}")
+            logger.info("Пробуем загрузить только train split...")
             raw_datasets = load_dataset(
                 data_args.dataset_name,
-                data_args.dataset_config,
+                split="train",
+                trust_remote_code=True,
             )
-        else:
-            raw_datasets = load_dataset(data_args.dataset_name)
+            # Преобразуем в DatasetDict
+            from datasets import DatasetDict
+            raw_datasets = DatasetDict({"train": raw_datasets})
 
         # Создаём validation split если его нет
         if "validation" not in raw_datasets and "train" in raw_datasets:
             split = raw_datasets["train"].train_test_split(test_size=0.02, seed=42)
-            raw_datasets = {
+            raw_datasets = DatasetDict({
                 "train": split["train"],
                 "validation": split["test"]
-            }
+            })
     else:
         # Локальные файлы
         data_files = {"train": data_args.train_file}
