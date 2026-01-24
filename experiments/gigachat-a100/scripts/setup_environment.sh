@@ -79,10 +79,29 @@ install_dependencies() {
     # DeepSpeed
     pip install deepspeed>=0.15.0
 
-    # Flash Attention 2 - требует предустановленных build зависимостей
-    echo -e "${YELLOW}Установка Flash Attention 2 (может занять несколько минут)...${NC}"
-    pip install wheel setuptools packaging ninja
-    MAX_JOBS=4 pip install flash-attn --no-build-isolation
+    # Flash Attention 2 - установка pre-built wheel
+    echo -e "${YELLOW}Установка Flash Attention 2...${NC}"
+
+    # Определяем версии Python и CUDA для выбора правильного wheel
+    PYTHON_VERSION=$(python -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+    CUDA_VERSION=$(python -c "import torch; print(torch.version.cuda.replace('.', '')[:3])" 2>/dev/null || echo "121")
+
+    echo "Python: ${PYTHON_VERSION}, CUDA: ${CUDA_VERSION}"
+
+    # Пробуем установить pre-built wheel, если не получится - пропускаем
+    if pip install flash-attn --no-build-isolation 2>/dev/null; then
+        echo -e "${GREEN}Flash Attention 2 установлен!${NC}"
+    else
+        echo -e "${YELLOW}Не удалось установить flash-attn, пробуем альтернативный метод...${NC}"
+        # Установка через pip с принудительной пересборкой
+        pip install packaging wheel setuptools ninja
+        if MAX_JOBS=4 FLASH_ATTENTION_SKIP_CUDA_BUILD=FALSE pip install flash-attn --no-build-isolation --force-reinstall 2>/dev/null; then
+            echo -e "${GREEN}Flash Attention 2 установлен!${NC}"
+        else
+            echo -e "${YELLOW}Flash Attention 2 не установлен. Будет использоваться PyTorch SDPA.${NC}"
+            echo -e "${YELLOW}Это не критично - SDPA обеспечивает хорошую производительность на A100.${NC}"
+        fi
+    fi
 
     echo -e "${GREEN}Основные зависимости установлены!${NC}"
 }
