@@ -24,11 +24,11 @@ training:
   num_train_epochs: 3
   max_steps: -1
 
-  # Batch size для H100 80GB (уменьшен для экономии памяти)
-  per_device_train_batch_size: 2
-  per_device_eval_batch_size: 2
-  gradient_accumulation_steps: 16
-  effective_batch_size: 32  # 2 * 16 = 32
+  # Batch size для H100 80GB (оптимизировано для полной памяти)
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 8
+  effective_batch_size: 32  # 4 * 8 = 32
 
   # Оптимизатор
   optim: "adamw_torch_fused"
@@ -49,10 +49,10 @@ training:
   fp16: false
   tf32: true
 
-  # Memory optimization (включено - на GPU другой процесс)
-  gradient_checkpointing: true
-  gradient_checkpointing_kwargs:
-    use_reentrant: false
+  # Memory optimization (отключено - H100 80GB имеет достаточно памяти)
+  gradient_checkpointing: false
+  # gradient_checkpointing_kwargs:
+  #   use_reentrant: false
 
   # Logging
   logging_steps: 10
