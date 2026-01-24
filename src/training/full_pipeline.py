@@ -94,11 +94,11 @@ class PipelineConfig:
     output_dir: str = "./outputs/gigachat-pipeline"
     cache_dir: str = "./cache"
 
-    # Mid-training
+    # Mid-training (оптимизировано для H100 80GB)
     mid_training_epochs: int = 1
     mid_training_lr: float = 2e-5
-    mid_training_batch_size: int = 2
-    mid_training_grad_accum: int = 8
+    mid_training_batch_size: int = 4  # H100 может больше
+    mid_training_grad_accum: int = 4
     mid_training_max_samples: int = 1000
 
     # RLVR
@@ -263,13 +263,16 @@ def load_model_and_tokenizer(config: PipelineConfig, logger):
     }
     torch_dtype = dtype_map.get(config.dtype, torch.bfloat16)
 
+    # Принудительно загружаем всё на GPU (H100 80GB)
+    # device_map="auto" может выгружать на CPU, что замедляет обучение
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
         torch_dtype=torch_dtype,
         trust_remote_code=True,
         attn_implementation="sdpa",
-        device_map="auto",
-        cache_dir=config.cache_dir
+        device_map={"": 0},  # Всё на GPU 0
+        cache_dir=config.cache_dir,
+        low_cpu_mem_usage=True,
     )
 
     logger.info(f"Модель загружена за {time.time() - start_time:.1f}s")
