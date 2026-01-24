@@ -1,0 +1,123 @@
+# GigaChat RLVR (Reinforcement Learning with Verifiable Rewards) Configuration
+# Based on Atropos framework with Interleaved Reasoning
+# Оптимизировано для NVIDIA H100 80GB
+
+# Модель
+model:
+  name: "ai-sage/GigaChat3-10B-A1.8B-bf16"
+  dtype: "bfloat16"
+  trust_remote_code: true
+  attn_implementation: "sdpa"
+
+# Конфигурация RLVR обучения
+training:
+  output_dir: "./outputs/gigachat-rlvr"
+  num_train_epochs: 1
+  seed: 42
+
+  # Batch size для H100 80GB
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  effective_batch_size: 16
+
+  # Оптимизатор (низкий LR для RL)
+  learning_rate: 5.0e-7
+  max_grad_norm: 1.0
+
+  # RLVR-специфичные параметры
+  num_generations: 4          # Количество роллаутов на промпт
+  max_new_tokens: 2048        # Максимальная длина генерации
+  temperature: 0.7            # Температура для exploration
+  top_p: 0.9
+
+  # Precision
+  bf16: true
+  tf32: true
+
+  # Logging
+  logging_steps: 10
+  save_steps: 500
+  save_total_limit: 3
+
+# Interleaved Thinking Configuration
+interleaved_thinking:
+  # Ограничения для генерации
+  max_reply_tokens: 2048
+  max_gen_per_turn: 512
+  max_rollout_turns: 3
+
+  # Формат think блока
+  think_open_tag: "<think>"
+  think_close_tag: "</think>"
+  tool_call_tag: "<tool_call>"
+  tool_response_tag: "<tool_response>"
+  answer_format: "\\boxed{}"
+
+# Награды (Verifiable Rewards)
+rewards:
+  # Основные награды
+  correct_answer: 1.0         # Правильный ответ в \boxed{}
+  incorrect_answer: -1.0      # Неправильный ответ
+  invalid_structure: -1.0     # Невалидная структура (нет </think> и т.д.)
+
+  # Бонусы
+  tool_usage_bonus: 0.2       # Бонус за использование инструментов
+  reasoning_bonus: 0.1        # Бонус за цепочку рассуждений
+
+  # Штрафы
+  tool_error_penalty: -0.1    # Штраф за ошибку инструмента
+  repetition_penalty: -0.05   # Штраф за повторения
+
+# Доступные инструменты
+tools:
+  calculator:
+    enabled: true
+    description: "Evaluate mathematical expressions"
+    usage: '{"name": "calculator", "arguments": {"expression": "2+2"}}'
+
+  python_interpreter:
+    enabled: true
+    description: "Execute Python code"
+    usage: '{"name": "python_interpreter", "arguments": {"code": "print(2+2)"}}'
+    # Для безопасности можно подключить к внешнему сервису
+    # endpoint: "http://localhost:5002/execute"
+
+# Конфигурация данных
+data:
+  dataset_name: "nvidia/Nemotron-Agentic-v1"
+  dataset_config: "tool_calling"
+  max_train_samples: 5000     # Для тестового запуска
+  max_seq_length: 4096
+
+# LoRA конфигурация
+lora:
+  enabled: true
+  r: 64
+  lora_alpha: 128
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+# H100 оптимизации
+hardware:
+  device: "cuda"
+  gpu_type: "H100-80GB"
+  num_gpus: 1
+
+# Wandb logging
+wandb:
+  project: "gigachat-rlvr"
+  run_name: "gigachat-10b-rlvr-v1"
+  tags:
+    - "rlvr"
+    - "interleaved-thinking"
+    - "tool-use"
+    - "H100"

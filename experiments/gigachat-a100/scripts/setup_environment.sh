@@ -79,6 +79,10 @@ install_dependencies() {
     # DeepSpeed
     pip install deepspeed>=0.15.0
 
+    # Atropos (RLVR framework from Nous Research)
+    echo -e "${YELLOW}Установка Atropos для RLVR...${NC}"
+    pip install atroposlib || echo -e "${YELLOW}atroposlib не установлен (опционально)${NC}"
+
     # Flash Attention 2 - установка pre-built wheel
     echo -e "${YELLOW}Установка Flash Attention 2...${NC}"
 
