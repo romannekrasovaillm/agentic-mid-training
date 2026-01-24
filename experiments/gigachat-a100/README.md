@@ -35,6 +35,20 @@ gigachat-a100/
 
 ## Быстрый старт
 
+### 0. Клонирование репозитория
+
+```bash
+# Клонирование репозитория
+git clone https://github.com/romannekrasovaillm/agentic-mid-training.git
+cd agentic-mid-training
+
+# Переключение на ветку эксперимента (опционально)
+git checkout claude/gigachat-agent-training-setup-EMEbE
+
+# Или получение последних изменений (если репозиторий уже склонирован)
+git pull origin main
+```
+
 ### 1. Установка окружения
 
 ```bash
