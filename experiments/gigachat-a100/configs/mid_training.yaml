@@ -76,9 +76,9 @@ data_mixing:
 
 # Конфигурация данных
 data:
-  # HuggingFace Hub датасет (nvidia/Nemotron-Agentic-v1)
+  # HuggingFace Hub датасет (nvidia/Nemotron-Agentic-v1 - 335K примеров)
   dataset_name: "nvidia/Nemotron-Agentic-v1"
-  dataset_config: "tool_calling"  # или "interactive_agent" (335K примеров)
+  # dataset_config не нужен - датасет имеет только default конфигурацию
 
   # Для тестового запуска ограничиваем выборку
   max_train_samples: 10000  # Убрать для полного обучения
