@@ -3,7 +3,7 @@
 
 # Модель
 model:
-  name: "ai-sage/GigaChat3-10B-A1.8B"
+  name: "ai-sage/GigaChat3-10B-A1.8B-bf16"  # bf16 версия для обучения (FP8 не поддерживает training)
   dtype: "bfloat16"
   trust_remote_code: true
   attn_implementation: "sdpa"  # sdpa (PyTorch SDPA), flash_attention_2, eager
