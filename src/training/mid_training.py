@@ -55,10 +55,16 @@ class ModelArguments:
 @dataclass
 class DataArguments:
     """Аргументы данных"""
-    train_file: str = "data/train.jsonl"
-    validation_file: Optional[str] = "data/validation.jsonl"
-    max_seq_length: int = 8192
+    # HuggingFace Hub датасет
+    dataset_name: Optional[str] = None  # e.g. "nvidia/Nemotron-Agentic-v1"
+    dataset_config: Optional[str] = None  # e.g. "tool_calling" или "interactive_agent"
+    # Локальные файлы (если dataset_name не указан)
+    train_file: Optional[str] = "data/train.jsonl"
+    validation_file: Optional[str] = None
+    # Общие параметры
+    max_seq_length: int = 4096
     preprocessing_num_workers: int = 16
+    max_train_samples: Optional[int] = None  # Ограничение выборки для тестов
 
 
 @dataclass
@@ -144,37 +150,104 @@ def setup_model_and_tokenizer(model_args: ModelArguments, lora_args: LoraArgumen
     return model, tokenizer
 
 
+def format_nemotron_messages(messages: list) -> list:
+    """Преобразование Nemotron формата в стандартный chat формат"""
+    formatted = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+
+        # Добавляем reasoning если есть
+        reasoning = msg.get("reasoning_content", "")
+        if reasoning:
+            content = f"<think>\n{reasoning}\n</think>\n{content}"
+
+        # Добавляем tool_calls если есть
+        tool_calls = msg.get("tool_calls", [])
+        if tool_calls:
+            import json
+            for tc in tool_calls:
+                if isinstance(tc, dict) and "function" in tc:
+                    func = tc["function"]
+                    tool_str = json.dumps({
+                        "name": func.get("name", ""),
+                        "arguments": func.get("arguments", {})
+                    }, ensure_ascii=False)
+                    content = f"{content}\n{tool_str}" if content else tool_str
+
+        formatted.append({"role": role, "content": content})
+
+    return formatted
+
+
 def prepare_dataset(data_args: DataArguments, tokenizer):
     """Подготовка датасета для обучения"""
     logger.info("Загрузка и подготовка датасета...")
 
-    # Загрузка данных
-    data_files = {"train": data_args.train_file}
-    if data_args.validation_file:
-        data_files["validation"] = data_args.validation_file
+    # Загрузка из HuggingFace Hub или локальных файлов
+    if data_args.dataset_name:
+        logger.info(f"Загрузка датасета из HuggingFace Hub: {data_args.dataset_name}")
+        if data_args.dataset_config:
+            raw_datasets = load_dataset(
+                data_args.dataset_name,
+                data_args.dataset_config,
+            )
+        else:
+            raw_datasets = load_dataset(data_args.dataset_name)
 
-    raw_datasets = load_dataset(
-        "json",
-        data_files=data_files,
-    )
+        # Создаём validation split если его нет
+        if "validation" not in raw_datasets and "train" in raw_datasets:
+            split = raw_datasets["train"].train_test_split(test_size=0.02, seed=42)
+            raw_datasets = {
+                "train": split["train"],
+                "validation": split["test"]
+            }
+    else:
+        # Локальные файлы
+        data_files = {"train": data_args.train_file}
+        if data_args.validation_file:
+            data_files["validation"] = data_args.validation_file
+
+        raw_datasets = load_dataset(
+            "json",
+            data_files=data_files,
+        )
+
+    # Ограничение выборки для тестов
+    if data_args.max_train_samples:
+        logger.info(f"Ограничение train выборки до {data_args.max_train_samples} примеров")
+        raw_datasets["train"] = raw_datasets["train"].select(
+            range(min(data_args.max_train_samples, len(raw_datasets["train"])))
+        )
+
+    logger.info(f"Train samples: {len(raw_datasets['train'])}")
+    if "validation" in raw_datasets:
+        logger.info(f"Validation samples: {len(raw_datasets['validation'])}")
 
     def tokenize_function(examples):
         """Токенизация примеров"""
-        # Поддержка разных форматов данных
-        if "messages" in examples:
-            # Chat format
-            texts = []
-            for messages in examples["messages"]:
+        texts = []
+
+        for i in range(len(examples["messages"])):
+            messages = examples["messages"][i]
+
+            # Преобразуем Nemotron формат если нужно
+            if messages and isinstance(messages[0], dict):
+                if "tool_calls" in messages[0] or "reasoning_content" in messages[0]:
+                    messages = format_nemotron_messages(messages)
+
+            # Применяем chat template
+            try:
                 text = tokenizer.apply_chat_template(
                     messages,
                     tokenize=False,
                     add_generation_prompt=False
                 )
-                texts.append(text)
-        elif "text" in examples:
-            texts = examples["text"]
-        else:
-            raise ValueError("Данные должны содержать 'messages' или 'text'")
+            except Exception as e:
+                # Fallback: простая конкатенация
+                text = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
+
+            texts.append(text)
 
         tokenized = tokenizer(
             texts,
@@ -186,11 +259,14 @@ def prepare_dataset(data_args: DataArguments, tokenizer):
 
         return tokenized
 
+    # Получаем колонки для удаления
+    columns_to_remove = raw_datasets["train"].column_names
+
     tokenized_datasets = raw_datasets.map(
         tokenize_function,
         batched=True,
         num_proc=data_args.preprocessing_num_workers,
-        remove_columns=raw_datasets["train"].column_names,
+        remove_columns=columns_to_remove,
         desc="Токенизация датасета",
     )
 
@@ -218,10 +294,13 @@ def main():
     )
 
     data_args = DataArguments(
-        train_file=config["data"]["train_file"],
+        dataset_name=config["data"].get("dataset_name"),
+        dataset_config=config["data"].get("dataset_config"),
+        train_file=config["data"].get("train_file"),
         validation_file=config["data"].get("validation_file"),
-        max_seq_length=config["data"].get("max_seq_length", 8192),
+        max_seq_length=config["data"].get("max_seq_length", 4096),
         preprocessing_num_workers=config["data"].get("preprocessing_num_workers", 16),
+        max_train_samples=config["data"].get("max_train_samples"),
     )
 
     lora_config = config.get("lora", {})

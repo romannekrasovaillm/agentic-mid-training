@@ -76,21 +76,19 @@ data_mixing:
 
 # Конфигурация данных
 data:
-  train_file: "data/train.jsonl"
-  validation_file: "data/validation.jsonl"
-  max_seq_length: 8192
+  # HuggingFace Hub датасет (nvidia/Nemotron-Agentic-v1)
+  dataset_name: "nvidia/Nemotron-Agentic-v1"
+  dataset_config: "tool_calling"  # или "interactive_agent" (335K примеров)
+
+  # Для тестового запуска ограничиваем выборку
+  max_train_samples: 10000  # Убрать для полного обучения
+
+  # Локальные файлы (используются если dataset_name не указан)
+  # train_file: "data/train.jsonl"
+  # validation_file: "data/validation.jsonl"
+
+  max_seq_length: 4096
   preprocessing_num_workers: 16
-
-  # Формат данных
-  chat_template: "gigachat"
-  add_special_tokens: true
-
-  # Агентные данные
-  agent_data:
-    include_tool_calls: true
-    include_observations: true
-    include_reasoning_traces: true
-    max_tool_calls_per_sample: 10
 
 # LoRA конфигурация (для эффективного обучения)
 lora:
