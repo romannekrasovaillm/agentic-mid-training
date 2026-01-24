@@ -127,10 +127,70 @@ class PipelineConfig:
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
 
-    # Logging
+    # Logging & Checkpoints
     logging_steps: int = 1
     save_steps: int = 100
     eval_steps: int = 50
+    save_total_limit: int = 3  # Хранить только последние N чекпойнтов
+
+
+def cleanup_checkpoints(output_dir: str, prefix: str, keep_last: int, logger):
+    """
+    Удаление старых чекпойнтов, оставляя только последние keep_last
+
+    Args:
+        output_dir: Директория с чекпойнтами
+        prefix: Префикс имени чекпойнта (например, 'mid-training-epoch', 'checkpoint-step')
+        keep_last: Сколько последних чекпойнтов оставить
+        logger: Логгер
+    """
+    import glob
+    import shutil
+
+    # Найти все чекпойнты с данным префиксом
+    pattern = os.path.join(output_dir, f"{prefix}*")
+    checkpoints = glob.glob(pattern)
+
+    if len(checkpoints) <= keep_last:
+        return
+
+    # Сортируем по времени модификации (старые первые)
+    checkpoints_with_time = []
+    for ckpt in checkpoints:
+        if os.path.isdir(ckpt):
+            mtime = os.path.getmtime(ckpt)
+            checkpoints_with_time.append((ckpt, mtime))
+
+    checkpoints_with_time.sort(key=lambda x: x[1])
+
+    # Удаляем старые, оставляя keep_last последних
+    to_delete = checkpoints_with_time[:-keep_last] if keep_last > 0 else checkpoints_with_time
+
+    for ckpt_path, _ in to_delete:
+        try:
+            shutil.rmtree(ckpt_path)
+            logger.info(f"Удалён старый чекпойнт: {ckpt_path}")
+        except Exception as e:
+            logger.warning(f"Не удалось удалить {ckpt_path}: {e}")
+
+    remaining = len(checkpoints) - len(to_delete)
+    logger.info(f"Очистка чекпойнтов: удалено {len(to_delete)}, осталось {remaining}")
+
+
+def get_checkpoint_size(checkpoint_dir: str) -> str:
+    """Получить размер чекпойнта в человекочитаемом формате"""
+    total_size = 0
+    for dirpath, dirnames, filenames in os.walk(checkpoint_dir):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            total_size += os.path.getsize(fp)
+
+    # Конвертируем в читаемый формат
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if total_size < 1024:
+            return f"{total_size:.1f}{unit}"
+        total_size /= 1024
+    return f"{total_size:.1f}TB"
 
 
 class AgenticDataset(Dataset):
@@ -457,9 +517,22 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
         # Save checkpoint
         if (epoch + 1) % 1 == 0:
             save_path = os.path.join(config.output_dir, f"mid-training-epoch-{epoch + 1}")
+            os.makedirs(save_path, exist_ok=True)
             logger.info(f"Сохранение checkpoint: {save_path}")
             model.save_pretrained(save_path)
             tokenizer.save_pretrained(save_path)
+
+            # Логируем размер чекпойнта
+            ckpt_size = get_checkpoint_size(save_path)
+            logger.info(f"Размер чекпойнта: {ckpt_size}")
+
+            # Очистка старых чекпойнтов
+            cleanup_checkpoints(
+                config.output_dir,
+                "mid-training-epoch-",
+                config.save_total_limit,
+                logger
+            )
 
     logger.info("Mid-Training завершен!")
     return model
@@ -564,16 +637,35 @@ def run_rlvr_training(model, tokenizer, config: PipelineConfig, logger):
                 f"Tools: {info.get('tool_calls_count', 0)}"
             )
 
+        # Промежуточное сохранение каждые 100 шагов
+        if (i + 1) % 100 == 0:
+            step_save_path = os.path.join(config.output_dir, f"rlvr-step-{i + 1}")
+            os.makedirs(step_save_path, exist_ok=True)
+            model.save_pretrained(step_save_path)
+            tokenizer.save_pretrained(step_save_path)
+            logger.info(f"Промежуточный чекпойнт: {step_save_path}")
+
+            # Очистка старых RLVR чекпойнтов
+            cleanup_checkpoints(
+                config.output_dir,
+                "rlvr-step-",
+                config.save_total_limit,
+                logger
+            )
+
     # Final optimizer step
     optimizer.step()
     optimizer.zero_grad()
 
     # Save final model
     save_path = os.path.join(config.output_dir, "rlvr-final")
+    os.makedirs(save_path, exist_ok=True)
     logger.info(f"Сохранение финальной модели: {save_path}")
     model.save_pretrained(save_path)
     tokenizer.save_pretrained(save_path)
 
+    ckpt_size = get_checkpoint_size(save_path)
+    logger.info(f"Размер финальной модели: {ckpt_size}")
     logger.info(f"RLVR Training завершен! Avg Reward: {total_reward / max(num_samples, 1):.3f}")
     return model
 
