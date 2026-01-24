@@ -34,13 +34,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def is_flash_attn_available():
+    """Проверка доступности flash attention"""
+    try:
+        import flash_attn
+        return True
+    except ImportError:
+        return False
+
+
 @dataclass
 class ModelArguments:
     """Аргументы модели"""
     model_name_or_path: str = "ai-sage/GigaChat3-10B-A1.8B"
     torch_dtype: str = "bfloat16"
     trust_remote_code: bool = True
-    use_flash_attention_2: bool = True
+    attn_implementation: str = "sdpa"  # sdpa, flash_attention_2, eager
 
 
 @dataclass
@@ -99,11 +108,19 @@ def setup_model_and_tokenizer(model_args: ModelArguments, lora_args: LoraArgumen
     # Модель
     torch_dtype = get_torch_dtype(model_args.torch_dtype)
 
+    # Выбор реализации attention
+    attn_impl = model_args.attn_implementation
+    if attn_impl == "flash_attention_2" and not is_flash_attn_available():
+        logger.warning("Flash Attention 2 недоступен, используем SDPA")
+        attn_impl = "sdpa"
+
+    logger.info(f"Используем attention implementation: {attn_impl}")
+
     model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         torch_dtype=torch_dtype,
         trust_remote_code=model_args.trust_remote_code,
-        attn_implementation="flash_attention_2" if model_args.use_flash_attention_2 else "eager",
+        attn_implementation=attn_impl,
         device_map="auto",
     )
 
@@ -197,7 +214,7 @@ def main():
         model_name_or_path=config["model"]["name"],
         torch_dtype=config["model"].get("dtype", "bfloat16"),
         trust_remote_code=config["model"].get("trust_remote_code", True),
-        use_flash_attention_2=config["model"].get("use_flash_attention_2", True),
+        attn_implementation=config["model"].get("attn_implementation", "sdpa"),
     )
 
     data_args = DataArguments(
