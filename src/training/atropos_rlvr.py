@@ -81,10 +81,15 @@ class AtroposConfig:
     # Training
     output_dir: str = "./outputs/atropos-rlvr"
     num_episodes: int = 100
-    batch_size: int = 4
-    num_rollouts_per_prompt: int = 4
+    batch_size: int = 8  # Увеличен для лучшей утилизации
+    num_rollouts_per_prompt: int = 8  # Увеличено для параллельности
     learning_rate: float = 5e-7
     max_grad_norm: float = 1.0
+
+    # Async Generation (для максимальной утилизации KV-кэша)
+    max_concurrent_requests: int = 32  # Параллельные запросы к vLLM
+    use_beam_search: bool = False
+    best_of: int = 1  # Можно увеличить для better sampling
 
     # Generation
     temperature: float = 0.7
@@ -565,53 +570,69 @@ class InterleavedThinkingEnv:
         self,
         prompts: List[str],
         expected_answers: Optional[List[str]] = None,
-        num_rollouts: int = 4,
+        num_rollouts: int = 8,
     ) -> List[Dict[str, Any]]:
         """
-        Collect rollouts for a batch of prompts
+        Collect rollouts for a batch of prompts with high parallelism
 
         Returns:
             List of rollout dictionaries with response, reward, info
         """
-        logger.info(f"Collecting rollouts: {len(prompts)} prompts × {num_rollouts} rollouts")
+        total_requests = len(prompts) * num_rollouts
+        logger.info(f"Collecting rollouts: {len(prompts)} prompts × {num_rollouts} = {total_requests} total requests")
+        logger.info(f"Max concurrent: {self.config.max_concurrent_requests}")
 
         if expected_answers is None:
             expected_answers = [None] * len(prompts)
 
-        all_rollouts = []
+        # Создаём все задачи сразу для максимальной параллельности
+        all_tasks = []
+        task_metadata = []  # (prompt_idx, rollout_idx, expected_answer)
 
         for i, (prompt, expected) in enumerate(zip(prompts, expected_answers)):
-            logger.debug(f"Processing prompt {i + 1}/{len(prompts)}")
-
-            # Generate multiple rollouts for this prompt
-            tasks = [
-                self.vllm_client.generate_with_tools(
+            for j in range(num_rollouts):
+                task = self.vllm_client.generate_with_tools(
                     prompt,
                     max_turns=MAX_ROLLOUT_TURNS,
                     temperature=self.config.temperature,
                 )
-                for _ in range(num_rollouts)
-            ]
+                all_tasks.append(task)
+                task_metadata.append((i, j, prompt, expected))
 
-            results = await asyncio.gather(*tasks)
+        # Запускаем с ограничением параллельности через семафор
+        semaphore = asyncio.Semaphore(self.config.max_concurrent_requests)
 
-            for j, (response, tool_history) in enumerate(results):
-                reward, info = compute_reward(response, expected, self.config)
+        async def limited_task(task, meta):
+            async with semaphore:
+                result = await task
+                return result, meta
 
-                rollout = {
-                    "prompt": prompt,
-                    "response": response,
-                    "expected_answer": expected,
-                    "tool_history": tool_history,
-                    "reward": reward,
-                    "info": info,
-                }
-                all_rollouts.append(rollout)
+        # Собираем все результаты параллельно
+        logger.info(f"Launching {len(all_tasks)} async generation tasks...")
+        wrapped_tasks = [limited_task(task, meta) for task, meta in zip(all_tasks, task_metadata)]
+        results = await asyncio.gather(*wrapped_tasks)
 
-                logger.debug(
-                    f"Rollout {j + 1}: reward={reward:.3f}, "
-                    f"tools={info['tool_calls_count']}, "
-                    f"correct={info.get('answer_correct')}"
+        # Обрабатываем результаты
+        all_rollouts = []
+        for (response, tool_history), (prompt_idx, rollout_idx, prompt, expected) in results:
+            reward, info = compute_reward(response, expected, self.config)
+
+            rollout = {
+                "prompt": prompt,
+                "response": response,
+                "expected_answer": expected,
+                "tool_history": tool_history,
+                "reward": reward,
+                "info": info,
+                "prompt_idx": prompt_idx,
+                "rollout_idx": rollout_idx,
+            }
+            all_rollouts.append(rollout)
+
+            logger.debug(
+                f"Rollout P{prompt_idx}R{rollout_idx}: reward={reward:.3f}, "
+                f"tools={info['tool_calls_count']}, "
+                f"correct={info.get('answer_correct')}"
                 )
 
         avg_reward = sum(r["reward"] for r in all_rollouts) / len(all_rollouts)

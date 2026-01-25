@@ -63,6 +63,33 @@ def log_gpu_memory(logger, prefix: str = ""):
         logger.info(f"{prefix}GPU Memory: allocated={allocated:.2f}GB, reserved={reserved:.2f}GB, max={max_allocated:.2f}GB")
 
 
+def clear_gpu_memory(logger):
+    """Полная очистка GPU памяти между стадиями"""
+    import gc
+
+    logger.info("=" * 40)
+    logger.info("CLEARING GPU MEMORY")
+    logger.info("=" * 40)
+
+    log_gpu_memory(logger, "Before cleanup: ")
+
+    # Clear PyTorch cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+    # Force garbage collection
+    gc.collect()
+
+    # Additional CUDA synchronization
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+    log_gpu_memory(logger, "After cleanup: ")
+    logger.info("GPU memory cleared successfully")
+
+
 def log_system_info(logger):
     """Логирование системной информации"""
     logger.info("=" * 60)
@@ -676,12 +703,83 @@ def run_rlvr_training(model, tokenizer, config: PipelineConfig, logger):
     return model
 
 
+def start_vllm_server(model_name: str, port: int, logger) -> Optional[int]:
+    """Запуск vLLM сервера для RLVR фазы"""
+    import subprocess
+    import requests
+
+    logger.info("=" * 40)
+    logger.info("STARTING VLLM SERVER")
+    logger.info("=" * 40)
+
+    # Проверяем, не запущен ли уже сервер
+    try:
+        response = requests.get(f"http://localhost:{port}/health", timeout=2)
+        if response.status_code == 200:
+            logger.info(f"vLLM server already running on port {port}")
+            return None
+    except:
+        pass
+
+    logger.info(f"Starting vLLM server: {model_name} on port {port}")
+
+    cmd = [
+        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+        "--model", model_name,
+        "--port", str(port),
+        "--dtype", "bfloat16",
+        "--trust-remote-code",
+        "--max-model-len", "2048",
+    ]
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Ждём запуска сервера
+    logger.info("Waiting for vLLM server to start...")
+    import time
+    for i in range(60):
+        try:
+            response = requests.get(f"http://localhost:{port}/health", timeout=2)
+            if response.status_code == 200:
+                logger.info(f"vLLM server ready on port {port}")
+                return process.pid
+        except:
+            pass
+        time.sleep(5)
+        if i % 6 == 0:
+            logger.info(f"Still waiting... ({i*5}s)")
+
+    logger.error("vLLM server failed to start")
+    process.kill()
+    return None
+
+
+def stop_vllm_server(pid: Optional[int], logger):
+    """Остановка vLLM сервера"""
+    if pid is None:
+        return
+
+    import signal
+    logger.info(f"Stopping vLLM server (PID {pid})...")
+    try:
+        os.kill(pid, signal.SIGTERM)
+        logger.info("vLLM server stopped")
+    except ProcessLookupError:
+        logger.info("vLLM server already stopped")
+
+
 def main():
     parser = argparse.ArgumentParser(description="GigaChat Full Training Pipeline")
     parser.add_argument("--config", type=str, help="Path to config YAML file")
     parser.add_argument("--output-dir", type=str, default="./outputs/gigachat-pipeline")
     parser.add_argument("--mid-training-only", action="store_true", help="Run only mid-training")
     parser.add_argument("--rlvr-only", action="store_true", help="Run only RLVR")
+    parser.add_argument("--use-atropos", action="store_true", help="Use full Atropos with vLLM")
+    parser.add_argument("--vllm-port", type=int, default=8000, help="vLLM server port")
     parser.add_argument("--max-samples", type=int, default=100, help="Max training samples")
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs")
@@ -729,6 +827,8 @@ def main():
 
     log_system_info(logger)
 
+    vllm_pid = None
+
     try:
         # Load model
         model, tokenizer = load_model_and_tokenizer(config, logger)
@@ -736,22 +836,76 @@ def main():
         # Apply LoRA
         model = apply_lora(model, config, logger)
 
-        # Training stages
+        # ================================================================
+        # STAGE 1: MID-TRAINING
+        # ================================================================
         if not args.rlvr_only:
             logger.info("\n" + "=" * 60)
-            logger.info("STAGE 1: MID-TRAINING")
+            logger.info("STAGE 1: MID-TRAINING (SFT)")
             logger.info("=" * 60)
             model = run_mid_training(model, tokenizer, config, logger)
 
+            # Сохраняем checkpoint после mid-training
+            mid_checkpoint = os.path.join(config.output_dir, "mid-training-final")
+            os.makedirs(mid_checkpoint, exist_ok=True)
+            model.save_pretrained(mid_checkpoint)
+            tokenizer.save_pretrained(mid_checkpoint)
+            logger.info(f"Mid-training checkpoint saved: {mid_checkpoint}")
+
+        # ================================================================
+        # ОЧИСТКА ПАМЯТИ МЕЖДУ СТАДИЯМИ
+        # ================================================================
+        if not args.mid_training_only and not args.rlvr_only:
+            logger.info("\n")
+            clear_gpu_memory(logger)
+
+        # ================================================================
+        # STAGE 2: RLVR POST-TRAINING
+        # ================================================================
         if not args.mid_training_only:
             logger.info("\n" + "=" * 60)
             logger.info("STAGE 2: RLVR POST-TRAINING")
             logger.info("=" * 60)
-            try:
-                model = run_rlvr_training(model, tokenizer, config, logger)
-            except ImportError as e:
-                logger.warning(f"RLVR import error: {e}")
-                logger.warning("Skipping RLVR training")
+
+            if args.use_atropos:
+                # Используем полный Atropos с vLLM сервером
+                logger.info("Using full Atropos RLVR with vLLM server")
+
+                # Выгружаем модель из памяти для vLLM
+                logger.info("Unloading model from GPU for vLLM...")
+                del model
+                clear_gpu_memory(logger)
+
+                # Запускаем vLLM сервер
+                vllm_pid = start_vllm_server(config.model_name, args.vllm_port, logger)
+
+                if vllm_pid is not None or True:  # Сервер может быть уже запущен
+                    # Запускаем Atropos RLVR
+                    import asyncio
+                    from .atropos_rlvr import AtroposTrainer, AtroposConfig
+
+                    atropos_config = AtroposConfig(
+                        model_name=config.model_name,
+                        vllm_base_url=f"http://localhost:{args.vllm_port}/v1",
+                        output_dir=os.path.join(config.output_dir, "atropos-rlvr"),
+                        num_episodes=config.rlvr_epochs,
+                        batch_size=config.mid_training_batch_size,
+                        max_samples=config.rlvr_max_samples,
+                        max_concurrent_requests=32,  # Высокая параллельность
+                        num_rollouts_per_prompt=8,
+                    )
+
+                    trainer = AtroposTrainer(atropos_config)
+                    asyncio.run(trainer.train())
+                else:
+                    logger.error("Failed to start vLLM server, skipping Atropos RLVR")
+            else:
+                # Используем простой RLVR без vLLM
+                try:
+                    model = run_rlvr_training(model, tokenizer, config, logger)
+                except ImportError as e:
+                    logger.warning(f"RLVR import error: {e}")
+                    logger.warning("Skipping RLVR training")
 
         logger.info("\n" + "=" * 60)
         logger.info("PIPELINE COMPLETED SUCCESSFULLY")
@@ -761,6 +915,10 @@ def main():
     except Exception as e:
         logger.exception(f"Pipeline error: {e}")
         raise
+    finally:
+        # Останавливаем vLLM сервер если запускали
+        if vllm_pid is not None:
+            stop_vllm_server(vllm_pid, logger)
 
 
 if __name__ == "__main__":
