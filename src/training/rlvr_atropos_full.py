@@ -1047,7 +1047,7 @@ class FullRLVRTrainer:
         print(f"\n  {Colors.BOLD}{Colors.CYAN}✓ TASKS{Colors.END}")
         task_color = Colors.GREEN if summary['task_accuracy'] > 0.5 else Colors.YELLOW
         print(f"    Accuracy (all):    {task_color}{summary['task_accuracy']*100:.1f}%{Colors.END}")
-        print(f"    Accuracy (recent): {summary['recent_task_accuracy']*100:.1f}%")
+        print(f"    Accuracy (recent): {summary['task_accuracy_recent']*100:.1f}%")
         print(f"    Solved: {summary['tasks_solved']}/{summary['tasks_attempted']}")
 
         print(f"\n  {Colors.BOLD}⚡ THROUGHPUT{Colors.END}")
