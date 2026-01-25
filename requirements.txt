@@ -8,7 +8,7 @@ torchaudio>=2.2.0
 
 # Muon optimizer (fallback if torch.optim.Muon not available)
 # pip install git+https://github.com/KellerJordan/Muon
-muon @ git+https://github.com/KellerJordan/Muon
+muon-optimizer @ git+https://github.com/KellerJordan/Muon
 
 # Transformers ecosystem
 transformers>=4.45.0
@@ -32,7 +32,8 @@ vllm>=0.6.0
 # sglang[all]>=0.5.5  # Alternative inference engine
 
 # Atropos RLVR Framework
-atroposlib>=0.1.0
+# atroposlib (install from git if not on PyPI):
+# pip install git+https://github.com/NousResearch/atropos.git
 openai>=1.0.0
 aiohttp>=3.9.0
 
