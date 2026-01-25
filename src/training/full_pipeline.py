@@ -1666,26 +1666,75 @@ def stop_vllm_server(pid: Optional[int], logger):
 
 def main():
     parser = argparse.ArgumentParser(description="GigaChat Full Training Pipeline")
+
+    # Config file
     parser.add_argument("--config", type=str, help="Path to config YAML file")
+
+    # Model
+    parser.add_argument("--model", type=str, default="ai-sage/GigaChat3-10B-A1.8B-bf16",
+                        help="Model name or path")
+    parser.add_argument("--dtype", type=str, default="bfloat16",
+                        choices=["float16", "bfloat16", "float32"])
+
+    # Dataset
+    parser.add_argument("--dataset", type=str, default="nvidia/Nemotron-Agentic-v1",
+                        help="Dataset name")
+
+    # Output
     parser.add_argument("--output-dir", type=str, default="./outputs/gigachat-pipeline")
+
+    # Training mode
     parser.add_argument("--mid-training-only", action="store_true", help="Run only mid-training")
     parser.add_argument("--rlvr-only", action="store_true", help="Run only RLVR")
     parser.add_argument("--use-atropos", action="store_true", help="Use full Atropos with vLLM")
     parser.add_argument("--vllm-port", type=int, default=8000, help="vLLM server port")
-    parser.add_argument("--max-samples", type=int, default=100, help="Max training samples")
+
+    # Training hyperparameters
+    parser.add_argument("--max-samples", type=int, default=1000, help="Max training samples")
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs")
+    parser.add_argument("--learning-rate", type=float, default=2e-5, help="Learning rate for AdamW")
+    parser.add_argument("--muon-lr", type=float, default=0.02, help="Learning rate for Muon")
+    parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay")
+    parser.add_argument("--grad-accum", type=int, default=8, help="Gradient accumulation steps")
+    parser.add_argument("--max-seq-length", type=int, default=1024, help="Max sequence length")
+
+    # LoRA
+    parser.add_argument("--lora-r", type=int, default=64, help="LoRA rank")
+    parser.add_argument("--lora-alpha", type=int, default=128, help="LoRA alpha")
+    parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout")
+
+    # RLVR
     parser.add_argument("--max-turns", type=int, default=3, help="Max tool-use turns per rollout")
+    parser.add_argument("--rlvr-lr", type=float, default=5e-7, help="RLVR learning rate")
+
     args = parser.parse_args()
 
     # Setup config
     config = PipelineConfig()
+
+    # Apply CLI arguments
+    config.model_name = args.model
+    config.dtype = args.dtype
+    config.dataset_name = args.dataset
     config.output_dir = args.output_dir
+
     config.mid_training_max_samples = args.max_samples
     config.rlvr_max_samples = args.max_samples
     config.mid_training_batch_size = args.batch_size
     config.mid_training_epochs = args.epochs
+    config.mid_training_lr = args.learning_rate
+    config.muon_lr = args.muon_lr
+    config.weight_decay = args.weight_decay
+    config.mid_training_grad_accum = args.grad_accum
+    config.max_seq_length = args.max_seq_length
+
+    config.lora_r = args.lora_r
+    config.lora_alpha = args.lora_alpha
+    config.lora_dropout = args.lora_dropout
+
     config.rlvr_max_turns = args.max_turns
+    config.rlvr_lr = args.rlvr_lr
 
     if args.config and os.path.exists(args.config):
         with open(args.config, 'r') as f:
