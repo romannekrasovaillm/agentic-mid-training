@@ -885,7 +885,7 @@ def main():
         # ================================================================
         if not args.rlvr_only:
             logger.info("\n" + "=" * 60)
-            logger.info("STAGE 1: MID-TRAINING (SFT)")
+            logger.info("STAGE 1: MID-TRAINING (Next Token Prediction)")
             logger.info("=" * 60)
             model = run_mid_training(model, tokenizer, config, logger)
 

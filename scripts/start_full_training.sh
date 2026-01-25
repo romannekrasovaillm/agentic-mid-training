@@ -398,7 +398,7 @@ print_summary() {
     echo "  Output: $OUTPUT_DIR"
     echo ""
     echo -e "${GREEN}Training stages:${NC}"
-    [ "$RLVR_ONLY" = false ] && echo "  ✓ Mid-Training (SFT)"
+    [ "$RLVR_ONLY" = false ] && echo "  ✓ Mid-Training (Next Token Prediction)"
     [ "$MID_TRAINING_ONLY" = false ] && echo "  ✓ RLVR Post-Training"
     [ "$USE_ATROPOS" = true ] && echo "    └─ Using full Atropos with vLLM (max $MAX_TURNS turns)"
     echo ""
