@@ -41,6 +41,7 @@ VLLM_PORT=8000
 MAX_SAMPLES="${MAX_SAMPLES:-1000}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 EPOCHS="${EPOCHS:-1}"
+MAX_TURNS="${MAX_TURNS:-3}"
 OUTPUT_DIR="${OUTPUT_DIR:-./outputs/gigachat-pipeline}"
 
 # Флаги
@@ -61,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --samples) MAX_SAMPLES="$2"; shift 2 ;;
         --batch) BATCH_SIZE="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
+        --max-turns) MAX_TURNS="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -348,6 +350,7 @@ run_rlvr_training() {
             --max-samples "$MAX_SAMPLES" \
             --batch-size "$BATCH_SIZE" \
             --num-episodes "$EPOCHS" \
+            --max-turns "$MAX_TURNS" \
             --vllm-url "http://localhost:${VLLM_PORT}/v1"
     else
         log_info "Using simplified RLVR (no vLLM server)..."
@@ -389,12 +392,13 @@ print_summary() {
     echo "  Samples: $MAX_SAMPLES"
     echo "  Batch size: $BATCH_SIZE"
     echo "  Epochs: $EPOCHS"
+    echo "  Max turns: $MAX_TURNS"
     echo "  Output: $OUTPUT_DIR"
     echo ""
     echo -e "${GREEN}Training stages:${NC}"
     [ "$RLVR_ONLY" = false ] && echo "  ✓ Mid-Training (SFT)"
     [ "$MID_TRAINING_ONLY" = false ] && echo "  ✓ RLVR Post-Training"
-    [ "$USE_ATROPOS" = true ] && echo "    └─ Using full Atropos with vLLM"
+    [ "$USE_ATROPOS" = true ] && echo "    └─ Using full Atropos with vLLM (max $MAX_TURNS turns)"
     echo ""
 }
 

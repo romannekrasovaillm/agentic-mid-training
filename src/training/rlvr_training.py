@@ -76,6 +76,7 @@ class RLVRConfig:
     # RLVR specific
     num_generations: int = 4  # Number of rollouts per prompt
     max_new_tokens: int = MAX_REPLY_TOKENS
+    max_turns: int = 3  # Max tool-use turns per rollout
     temperature: float = 0.7
     top_p: float = 0.9
 
@@ -350,7 +351,7 @@ class InterleavedThinkingEnv:
         self.config = config
         self.tokenizer = tokenizer
         self.model = model
-        self.max_turns = MAX_ROLLOUT_TURNS
+        self.max_turns = config.max_turns
 
     def generate_with_tools(self, prompt: str, max_turns: int = None) -> tuple[str, list]:
         """Generate response with multi-turn tool execution"""

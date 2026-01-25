@@ -135,6 +135,7 @@ class PipelineConfig:
     rlvr_batch_size: int = 2
     rlvr_num_generations: int = 4
     rlvr_max_samples: int = 500
+    rlvr_max_turns: int = 3  # Max tool-use turns per rollout
 
     # LoRA
     lora_r: int = 64
@@ -783,6 +784,7 @@ def main():
     parser.add_argument("--max-samples", type=int, default=100, help="Max training samples")
     parser.add_argument("--batch-size", type=int, default=2, help="Batch size")
     parser.add_argument("--epochs", type=int, default=1, help="Number of epochs")
+    parser.add_argument("--max-turns", type=int, default=3, help="Max tool-use turns per rollout")
     args = parser.parse_args()
 
     # Setup config
@@ -792,6 +794,7 @@ def main():
     config.rlvr_max_samples = args.max_samples
     config.mid_training_batch_size = args.batch_size
     config.mid_training_epochs = args.epochs
+    config.rlvr_max_turns = args.max_turns
 
     if args.config and os.path.exists(args.config):
         with open(args.config, 'r') as f:
@@ -824,6 +827,7 @@ def main():
     logger.info(f"Max samples: {config.mid_training_max_samples}")
     logger.info(f"Batch size: {config.mid_training_batch_size}")
     logger.info(f"Epochs: {config.mid_training_epochs}")
+    logger.info(f"Max turns (RLVR): {config.rlvr_max_turns}")
 
     log_system_info(logger)
 
@@ -893,6 +897,7 @@ def main():
                         max_samples=config.rlvr_max_samples,
                         max_concurrent_requests=32,  # Высокая параллельность
                         num_rollouts_per_prompt=8,
+                        max_turns=config.rlvr_max_turns,  # Tool-use turns
                     )
 
                     trainer = AtroposTrainer(atropos_config)

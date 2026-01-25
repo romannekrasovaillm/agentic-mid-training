@@ -91,6 +91,9 @@ class AtroposConfig:
     use_beam_search: bool = False
     best_of: int = 1  # Можно увеличить для better sampling
 
+    # Multi-turn generation
+    max_turns: int = 3  # Максимум раундов tool-use в одном роллауте
+
     # Generation
     temperature: float = 0.7
     top_p: float = 0.9
@@ -484,7 +487,7 @@ class VLLMClient:
     async def generate_with_tools(
         self,
         prompt: str,
-        max_turns: int = MAX_ROLLOUT_TURNS,
+        max_turns: int = 3,
         max_tokens_per_turn: int = MAX_GEN_PER_TURN,
         temperature: float = 0.7,
     ) -> Tuple[str, List[Dict]]:
@@ -593,7 +596,7 @@ class InterleavedThinkingEnv:
             for j in range(num_rollouts):
                 task = self.vllm_client.generate_with_tools(
                     prompt,
-                    max_turns=MAX_ROLLOUT_TURNS,
+                    max_turns=self.config.max_turns,
                     temperature=self.config.temperature,
                 )
                 all_tasks.append(task)
@@ -1032,6 +1035,7 @@ async def main():
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--num-episodes", type=int, default=1)
     parser.add_argument("--vllm-url", type=str, default="http://localhost:8000/v1")
+    parser.add_argument("--max-turns", type=int, default=3, help="Max tool-use turns per rollout")
     args = parser.parse_args()
 
     # Load or create config
@@ -1046,6 +1050,7 @@ async def main():
     config.batch_size = args.batch_size
     config.num_episodes = args.num_episodes
     config.vllm_base_url = args.vllm_url
+    config.max_turns = args.max_turns
 
     # Create output dir
     os.makedirs(config.output_dir, exist_ok=True)
