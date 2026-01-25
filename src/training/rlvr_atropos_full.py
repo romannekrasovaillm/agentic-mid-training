@@ -570,31 +570,47 @@ class RolloutEnvironment:
         try:
             # Try loading tool_calling split first (main data for RLVR)
             try:
+                print(f"    Trying tool_calling config...")
                 dataset = load_dataset(dataset_name, "tool_calling", split="train")
                 self.samples.extend(list(dataset)[:max_samples])
-                print(f"    Loaded {len(self.samples)} from tool_calling split")
-            except Exception:
-                pass
+                print(f"    {Colors.success('✓')} Loaded {len(self.samples)} from tool_calling split")
+            except Exception as e:
+                print(f"    {Colors.warning('⚠')} tool_calling failed: {type(e).__name__}: {str(e)[:100]}")
 
             # Try interactive_agent split
             if len(self.samples) < max_samples:
                 try:
+                    print(f"    Trying interactive_agent config...")
                     dataset = load_dataset(dataset_name, "interactive_agent", split="train")
                     remaining = max_samples - len(self.samples)
                     self.samples.extend(list(dataset)[:remaining])
-                    print(f"    Loaded samples from interactive_agent split")
-                except Exception:
-                    pass
+                    print(f"    {Colors.success('✓')} Loaded samples from interactive_agent split")
+                except Exception as e:
+                    print(f"    {Colors.warning('⚠')} interactive_agent failed: {type(e).__name__}: {str(e)[:100]}")
 
-            # Fallback: try default split
+            # Fallback: try default split without config
             if not self.samples:
                 try:
+                    print(f"    Trying default split...")
                     dataset = load_dataset(dataset_name, split="train")
                     self.samples = list(dataset)[:max_samples]
-                except Exception:
-                    pass
+                    print(f"    {Colors.success('✓')} Loaded {len(self.samples)} from default split")
+                except Exception as e:
+                    print(f"    {Colors.warning('⚠')} default split failed: {type(e).__name__}: {str(e)[:100]}")
 
-            # Final fallback: load from local or generate synthetic
+            # Try loading as JSON files directly
+            if not self.samples:
+                try:
+                    print(f"    Trying to load as JSON...")
+                    dataset = load_dataset("json", data_files={
+                        "train": f"hf://datasets/{dataset_name}/data/tool_calling.jsonl"
+                    }, split="train")
+                    self.samples = list(dataset)[:max_samples]
+                    print(f"    {Colors.success('✓')} Loaded {len(self.samples)} from JSON")
+                except Exception as e:
+                    print(f"    {Colors.warning('⚠')} JSON load failed: {type(e).__name__}: {str(e)[:100]}")
+
+            # Final fallback: generate synthetic
             if not self.samples:
                 print(f"  {Colors.warning('⚠')} Could not load dataset, using synthetic data")
                 self.samples = self._generate_synthetic_samples(max_samples)
@@ -603,7 +619,7 @@ class RolloutEnvironment:
             print(f"  {Colors.success('✓')} Loaded {len(self.samples)} samples total")
 
         except Exception as e:
-            print(f"  {Colors.error('✗')} Error loading dataset: {e}")
+            print(f"  {Colors.error('✗')} Error loading dataset: {type(e).__name__}: {e}")
             print(f"  {Colors.warning('⚠')} Using synthetic data")
             self.samples = self._generate_synthetic_samples(max_samples)
 
