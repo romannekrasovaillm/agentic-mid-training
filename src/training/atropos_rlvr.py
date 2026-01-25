@@ -835,6 +835,13 @@ class AtroposTrainer:
         logger.info(f"Loaded {len(samples)} samples")
         return samples
 
+    def truncate_text(self, text: str, start_chars: int = 100, end_chars: int = 80) -> str:
+        """Обрезка текста с показом начала и конца"""
+        text = text.strip().replace('\n', ' ')
+        if len(text) <= start_chars + end_chars + 10:
+            return text
+        return f"{text[:start_chars]}...{text[-end_chars:]}"
+
     async def train(self):
         """Main training loop"""
         logger.info("=" * 60)
@@ -848,10 +855,17 @@ class AtroposTrainer:
         # Training loop
         num_batches = len(samples) // self.config.batch_size
 
+        # Накопительная статистика с начала обучения
+        cumulative_reward = 0.0
+        cumulative_samples = 0
+        total_tool_calls = 0
+        total_correct = 0
+        total_rollouts = 0
+
         for episode in range(self.config.num_episodes):
-            logger.info(f"\n{'='*40}")
+            logger.info(f"\n{'='*60}")
             logger.info(f"EPISODE {episode + 1}/{self.config.num_episodes}")
-            logger.info(f"{'='*40}")
+            logger.info(f"{'='*60}")
 
             episode_rewards = []
             episode_losses = []
@@ -862,6 +876,15 @@ class AtroposTrainer:
                 batch = samples[start_idx:end_idx]
 
                 self.step += 1
+
+                # Отображение задач в батче
+                logger.info(f"\n{'─'*50}")
+                logger.info(f"BATCH {batch_idx + 1}/{num_batches} | Step {self.step}")
+                logger.info(f"{'─'*50}")
+                for idx, sample in enumerate(batch):
+                    question = sample.get("question", "")
+                    truncated = self.truncate_text(question, 80, 60)
+                    logger.info(f"  Task {idx + 1}: {truncated}")
 
                 # Collect rollouts
                 prompts = [s["prompt"] for s in batch]
@@ -884,19 +907,35 @@ class AtroposTrainer:
                 episode_rewards.append(batch_reward)
                 episode_losses.append(loss)
 
-                tool_usage = sum(r["info"]["tool_calls_count"] for r in rollouts) / len(rollouts)
-                correct = sum(1 for r in rollouts if r["info"].get("answer_correct")) / len(rollouts)
+                tool_usage = sum(r["info"]["tool_calls_count"] for r in rollouts)
+                correct_count = sum(1 for r in rollouts if r["info"].get("answer_correct"))
+                avg_tools = tool_usage / len(rollouts)
+                correct_rate = correct_count / len(rollouts)
+
+                # Накопительная статистика
+                cumulative_reward += sum(r["reward"] for r in rollouts)
+                cumulative_samples += len(rollouts)
+                total_tool_calls += tool_usage
+                total_correct += correct_count
+                total_rollouts += len(rollouts)
+
+                cumulative_avg_reward = cumulative_reward / cumulative_samples
+                cumulative_tool_rate = total_tool_calls / total_rollouts
+                cumulative_correct_rate = total_correct / total_rollouts
 
                 # Logging
                 if self.step % self.config.log_every_n_steps == 0:
-                    logger.info(
-                        f"Step {self.step} | "
-                        f"Batch {batch_idx + 1}/{num_batches} | "
-                        f"Reward: {batch_reward:.3f} | "
-                        f"Loss: {loss:.4f} | "
-                        f"Tools: {tool_usage:.1f} | "
-                        f"Correct: {correct:.1%}"
-                    )
+                    logger.info(f"\n┌{'─'*58}┐")
+                    logger.info(f"│ STEP {self.step:>4} RESULTS{' '*41}│")
+                    logger.info(f"├{'─'*58}┤")
+                    logger.info(f"│ Batch Reward:      {batch_reward:>8.3f}  │  Loss: {loss:>10.6f}  │")
+                    logger.info(f"│ Batch Tools:       {avg_tools:>8.2f}  │  Correct: {correct_rate:>7.1%}  │")
+                    logger.info(f"├{'─'*58}┤")
+                    logger.info(f"│ CUMULATIVE (from start):{' '*33}│")
+                    logger.info(f"│ Avg Reward:        {cumulative_avg_reward:>8.3f}  │  Samples: {cumulative_samples:>6}  │")
+                    logger.info(f"│ Avg Tools:         {cumulative_tool_rate:>8.2f}  │  Correct: {cumulative_correct_rate:>7.1%}  │")
+                    logger.info(f"│ Total Reward Sum:  {cumulative_reward:>8.1f}{' '*28}│")
+                    logger.info(f"└{'─'*58}┘")
 
                 # Save checkpoint
                 if self.step % self.config.save_every_n_steps == 0:
@@ -909,9 +948,15 @@ class AtroposTrainer:
             self.stats["rewards"].append(avg_reward)
             self.stats["losses"].append(avg_loss)
 
-            logger.info(f"\nEpisode {episode + 1} Summary:")
-            logger.info(f"  Avg Reward: {avg_reward:.3f}")
-            logger.info(f"  Avg Loss: {avg_loss:.4f}")
+            logger.info(f"\n{'='*60}")
+            logger.info(f"EPISODE {episode + 1} SUMMARY")
+            logger.info(f"{'='*60}")
+            logger.info(f"  Episode Avg Reward:      {avg_reward:.3f}")
+            logger.info(f"  Episode Avg Loss:        {avg_loss:.4f}")
+            logger.info(f"  Cumulative Avg Reward:   {cumulative_avg_reward:.3f}")
+            logger.info(f"  Cumulative Total Reward: {cumulative_reward:.1f}")
+            logger.info(f"  Total Samples Processed: {cumulative_samples}")
+            logger.info(f"{'='*60}")
 
             # Save checkpoint
             self.save_checkpoint(f"episode-{episode + 1}")
