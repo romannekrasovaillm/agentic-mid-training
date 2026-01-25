@@ -704,11 +704,12 @@ class PipelineConfig:
 
     # Mid-training (оптимизировано для H100 80GB с gradient checkpointing)
     mid_training_epochs: int = 1
-    mid_training_lr: float = 2e-5
+    mid_training_lr: float = 5e-6  # Уменьшен для предотвращения переобучения
     mid_training_batch_size: int = 2  # Уменьшено из-за OOM
     mid_training_grad_accum: int = 8  # Компенсируем меньший batch
-    mid_training_max_samples: int = 1000
+    mid_training_max_samples: int = 10000  # Увеличено для лучшей генерализации
     gradient_checkpointing: bool = True  # Экономит память
+    validation_split: float = 0.1  # 10% данных на валидацию
 
     # RLVR
     rlvr_epochs: int = 1
@@ -718,10 +719,10 @@ class PipelineConfig:
     rlvr_max_samples: int = 500
     rlvr_max_turns: int = 3  # Max tool-use turns per rollout
 
-    # LoRA
-    lora_r: int = 64
-    lora_alpha: int = 128
-    lora_dropout: float = 0.05
+    # LoRA (уменьшено для предотвращения переобучения)
+    lora_r: int = 32  # Было 64
+    lora_alpha: int = 64  # Было 128
+    lora_dropout: float = 0.1  # Увеличено для регуляризации
     lora_target_modules: list = field(default_factory=lambda: [
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj"
@@ -1298,6 +1299,99 @@ def train_epoch(
     return summary['global_loss']
 
 
+def validate_epoch(
+    model,
+    dataloader,
+    config: PipelineConfig,
+    logger,
+    epoch: int,
+):
+    """
+    Валидация модели на отложенной выборке.
+
+    Возвращает:
+    - val_loss: средний loss на валидации
+    - val_ppl: perplexity
+    - val_acc: token accuracy
+    """
+    model.eval()
+
+    total_loss = 0.0
+    total_tokens = 0
+    total_correct = 0
+    total_samples = 0
+
+    progress_bar = tqdm(
+        dataloader,
+        desc=f"{Colors.YELLOW}Validation{Colors.END}",
+        leave=True,
+        file=sys.stdout,
+        bar_format="{l_bar}{bar:30}{r_bar}",
+        ncols=100
+    )
+
+    with torch.no_grad():
+        for batch in progress_bar:
+            batch = {k: v.to(model.device) for k, v in batch.items()}
+
+            # Count tokens
+            attention_mask = batch.get("attention_mask", None)
+            if attention_mask is not None:
+                num_tokens = attention_mask.sum().item()
+            else:
+                num_tokens = batch["input_ids"].numel()
+
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                outputs = model(**batch)
+
+            # Compute token accuracy
+            correct_tokens, tokens_count = compute_token_accuracy(
+                outputs.logits, batch["labels"]
+            )
+
+            total_loss += outputs.loss.item() * num_tokens
+            total_tokens += num_tokens
+            total_correct += correct_tokens
+            total_samples += batch["input_ids"].shape[0]
+
+            # Update progress
+            current_loss = total_loss / total_tokens if total_tokens > 0 else 0
+            current_ppl = math.exp(min(current_loss, 20))
+            current_acc = total_correct / total_tokens if total_tokens > 0 else 0
+
+            progress_bar.set_postfix_str(
+                f"loss={current_loss:.4f} | ppl={current_ppl:.2f} | acc={current_acc*100:.1f}%"
+            )
+
+    # Calculate final metrics
+    val_loss = total_loss / total_tokens if total_tokens > 0 else 0
+    val_ppl = math.exp(min(val_loss, 20))
+    val_acc = total_correct / total_tokens if total_tokens > 0 else 0
+
+    # Print validation results
+    print_box(
+        f"VALIDATION EPOCH {epoch + 1}",
+        [
+            f"Validation Loss:       {Colors.BOLD}{val_loss:.4f}{Colors.END}",
+            f"Validation Perplexity: {Colors.CYAN}{val_ppl:.2f}{Colors.END}",
+            f"Validation Token Acc:  {Colors.GREEN}{val_acc*100:.2f}%{Colors.END}",
+            f"",
+            f"Samples: {total_samples:,} | Tokens: {total_tokens:,}",
+        ],
+        width=60
+    )
+
+    logger.info(
+        f"[Validation] Epoch {epoch + 1} | "
+        f"Loss: {val_loss:.4f} | "
+        f"PPL: {val_ppl:.2f} | "
+        f"Acc: {val_acc*100:.2f}%"
+    )
+
+    model.train()
+    return val_loss, val_ppl, val_acc
+
+
 def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
     """Запуск Mid-Training (Continued Pre-Training with Next Token Prediction)"""
 
@@ -1322,13 +1416,43 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
     # Загрузка данных (mid-training берёт первую часть датасета)
     samples = load_dataset_samples(config, logger, config.mid_training_max_samples, for_rlvr=False)
 
-    dataset = AgenticDataset(samples, tokenizer, config.max_seq_length)
+    # Разделение на train/validation
+    import random
+    random.seed(config.dataset_split_seed)
+    random.shuffle(samples)
+
+    val_size = int(len(samples) * config.validation_split)
+    train_samples = samples[val_size:]
+    val_samples = samples[:val_size]
+
+    print_box(
+        "DATA SPLIT",
+        [
+            f"Total samples:      {Colors.BOLD}{len(samples):,}{Colors.END}",
+            f"Training samples:   {Colors.GREEN}{len(train_samples):,}{Colors.END} ({100 - config.validation_split*100:.0f}%)",
+            f"Validation samples: {Colors.YELLOW}{len(val_samples):,}{Colors.END} ({config.validation_split*100:.0f}%)",
+        ],
+        width=60
+    )
+
+    logger.info(f"Data split: {len(train_samples)} train, {len(val_samples)} val")
+
+    train_dataset = AgenticDataset(train_samples, tokenizer, config.max_seq_length)
+    val_dataset = AgenticDataset(val_samples, tokenizer, config.max_seq_length)
 
     dataloader = DataLoader(
-        dataset,
+        train_dataset,
         batch_size=config.mid_training_batch_size,
         shuffle=True,
         num_workers=0,  # Avoid multiprocessing issues
+        pin_memory=True
+    )
+
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=config.mid_training_batch_size,
+        shuffle=False,
+        num_workers=0,
         pin_memory=True
     )
 
@@ -1377,7 +1501,8 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
     print_box(
         "TRAINING CONFIGURATION",
         [
-            f"Dataset size: {Colors.BOLD}{len(dataset):,}{Colors.END} samples",
+            f"Train samples: {Colors.BOLD}{len(train_dataset):,}{Colors.END}",
+            f"Val samples: {Colors.YELLOW}{len(val_dataset):,}{Colors.END}",
             f"Batches per epoch: {Colors.BOLD}{len(dataloader):,}{Colors.END}",
             "",
             f"Batch size: {config.mid_training_batch_size}",
@@ -1396,7 +1521,7 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
         width=70
     )
 
-    logger.info(f"Dataset size: {len(dataset)}")
+    logger.info(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
     logger.info(f"Batches per epoch: {len(dataloader)}")
     logger.info(f"Total optimization steps: {total_steps}")
     logger.info(f"Warmup steps: {warmup_steps}")
@@ -1404,6 +1529,9 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
 
     # Training loop
     training_start = time.time()
+    best_val_loss = float('inf')
+    train_losses = []
+    val_losses = []
 
     for epoch in range(config.mid_training_epochs):
         print()
@@ -1416,10 +1544,40 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
             width=50
         )
 
-        avg_loss = train_epoch(
+        # Training
+        train_loss = train_epoch(
             model, dataloader, optimizer, scheduler,
             config, logger, epoch, "mid-training"
         )
+        train_losses.append(train_loss)
+
+        # Validation
+        val_loss, val_ppl, val_acc = validate_epoch(
+            model, val_dataloader, config, logger, epoch
+        )
+        val_losses.append(val_loss)
+
+        # Check for overfitting
+        if len(train_losses) > 0 and len(val_losses) > 0:
+            train_ppl = math.exp(min(train_loss, 20))
+            gap = val_loss - train_loss
+            gap_pct = (gap / train_loss * 100) if train_loss > 0 else 0
+
+            if gap > 0.1 or gap_pct > 20:
+                print(f"\n  {Colors.warning('⚠ OVERFITTING WARNING')}")
+                print(f"    Train Loss: {train_loss:.4f} (PPL: {train_ppl:.2f})")
+                print(f"    Val Loss:   {val_loss:.4f} (PPL: {val_ppl:.2f})")
+                print(f"    Gap: {Colors.RED}{gap:.4f} ({gap_pct:.1f}%){Colors.END}")
+                logger.warning(f"Overfitting detected: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}, gap={gap:.4f}")
+            else:
+                print(f"\n  {Colors.success('✓ No overfitting detected')}")
+                print(f"    Train/Val gap: {gap:.4f} ({gap_pct:.1f}%)")
+
+        # Track best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch + 1
+            print(f"  {Colors.success('✓ New best model!')}")
 
         # Save checkpoint
         if (epoch + 1) % 1 == 0:
@@ -1443,6 +1601,8 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
 
     # Training complete summary
     total_time = time.time() - training_start
+    final_train_ppl = math.exp(min(train_losses[-1], 20)) if train_losses else 0
+    final_val_ppl = math.exp(min(val_losses[-1], 20)) if val_losses else 0
 
     print()
     print_box(
@@ -1452,6 +1612,10 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
             "",
             f"Total time: {Colors.BOLD}{format_time(total_time)}{Colors.END}",
             f"Epochs completed: {config.mid_training_epochs}",
+            "",
+            f"Final Train Loss: {train_losses[-1]:.4f} (PPL: {final_train_ppl:.2f})",
+            f"Final Val Loss:   {val_losses[-1]:.4f} (PPL: {final_val_ppl:.2f})",
+            f"Best Val Loss:    {best_val_loss:.4f} (Epoch {best_epoch})",
             "",
             f"Final checkpoint: {config.output_dir}/mid-training-epoch-{config.mid_training_epochs}",
         ],
