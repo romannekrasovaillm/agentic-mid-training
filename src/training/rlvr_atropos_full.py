@@ -568,47 +568,97 @@ class RolloutEnvironment:
         self.samples = []
 
         try:
-            # Try loading tool_calling split first (main data for RLVR)
+            # Try loading with streaming to handle schema issues
             try:
-                print(f"    Trying tool_calling config...")
-                dataset = load_dataset(dataset_name, "tool_calling", split="train")
-                self.samples.extend(list(dataset)[:max_samples])
-                print(f"    {Colors.success('✓')} Loaded {len(self.samples)} from tool_calling split")
-            except Exception as e:
-                print(f"    {Colors.warning('⚠')} tool_calling failed: {type(e).__name__}: {str(e)[:100]}")
+                print(f"    Trying streaming mode...")
+                from huggingface_hub import hf_hub_download
+                import json as json_module
 
-            # Try interactive_agent split
+                # Download the JSONL file directly
+                file_path = hf_hub_download(
+                    repo_id=dataset_name,
+                    filename="data/tool_calling.jsonl",
+                    repo_type="dataset"
+                )
+
+                print(f"    Loading from: {file_path}")
+                loaded = 0
+                errors = 0
+
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if loaded >= max_samples:
+                            break
+                        try:
+                            sample = json_module.loads(line.strip())
+                            # Normalize messages - ensure content is string
+                            if "messages" in sample:
+                                normalized_messages = []
+                                for msg in sample["messages"]:
+                                    content = msg.get("content", "")
+                                    if isinstance(content, dict):
+                                        content = json_module.dumps(content)
+                                    elif isinstance(content, list):
+                                        content = " ".join(str(c) for c in content)
+                                    normalized_messages.append({
+                                        "role": msg.get("role", "user"),
+                                        "content": str(content)
+                                    })
+                                sample["messages"] = normalized_messages
+                            self.samples.append(sample)
+                            loaded += 1
+                        except Exception:
+                            errors += 1
+                            continue
+
+                print(f"    {Colors.success('✓')} Loaded {loaded} samples (skipped {errors} errors)")
+
+            except Exception as e:
+                print(f"    {Colors.warning('⚠')} Streaming failed: {type(e).__name__}: {str(e)[:100]}")
+
+            # Try interactive_agent file
             if len(self.samples) < max_samples:
                 try:
-                    print(f"    Trying interactive_agent config...")
-                    dataset = load_dataset(dataset_name, "interactive_agent", split="train")
+                    from huggingface_hub import hf_hub_download
+                    import json as json_module
+
+                    file_path = hf_hub_download(
+                        repo_id=dataset_name,
+                        filename="data/interactive_agent.jsonl",
+                        repo_type="dataset"
+                    )
+
                     remaining = max_samples - len(self.samples)
-                    self.samples.extend(list(dataset)[:remaining])
-                    print(f"    {Colors.success('✓')} Loaded samples from interactive_agent split")
-                except Exception as e:
-                    print(f"    {Colors.warning('⚠')} interactive_agent failed: {type(e).__name__}: {str(e)[:100]}")
+                    loaded = 0
 
-            # Fallback: try default split without config
-            if not self.samples:
-                try:
-                    print(f"    Trying default split...")
-                    dataset = load_dataset(dataset_name, split="train")
-                    self.samples = list(dataset)[:max_samples]
-                    print(f"    {Colors.success('✓')} Loaded {len(self.samples)} from default split")
-                except Exception as e:
-                    print(f"    {Colors.warning('⚠')} default split failed: {type(e).__name__}: {str(e)[:100]}")
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if loaded >= remaining:
+                                break
+                            try:
+                                sample = json_module.loads(line.strip())
+                                if "messages" in sample:
+                                    normalized_messages = []
+                                    for msg in sample["messages"]:
+                                        content = msg.get("content", "")
+                                        if isinstance(content, dict):
+                                            content = json_module.dumps(content)
+                                        elif isinstance(content, list):
+                                            content = " ".join(str(c) for c in content)
+                                        normalized_messages.append({
+                                            "role": msg.get("role", "user"),
+                                            "content": str(content)
+                                        })
+                                    sample["messages"] = normalized_messages
+                                self.samples.append(sample)
+                                loaded += 1
+                            except Exception:
+                                continue
 
-            # Try loading as JSON files directly
-            if not self.samples:
-                try:
-                    print(f"    Trying to load as JSON...")
-                    dataset = load_dataset("json", data_files={
-                        "train": f"hf://datasets/{dataset_name}/data/tool_calling.jsonl"
-                    }, split="train")
-                    self.samples = list(dataset)[:max_samples]
-                    print(f"    {Colors.success('✓')} Loaded {len(self.samples)} from JSON")
+                    print(f"    {Colors.success('✓')} Added {loaded} from interactive_agent")
+
                 except Exception as e:
-                    print(f"    {Colors.warning('⚠')} JSON load failed: {type(e).__name__}: {str(e)[:100]}")
+                    print(f"    {Colors.warning('⚠')} interactive_agent failed: {str(e)[:50]}")
 
             # Final fallback: generate synthetic
             if not self.samples:
