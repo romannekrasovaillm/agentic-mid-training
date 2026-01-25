@@ -48,6 +48,7 @@ SKIP_INSTALL=false
 MID_TRAINING_ONLY=false
 RLVR_ONLY=false
 USE_ATROPOS=false
+KILL_PYTHON=false
 
 # Парсинг аргументов
 while [[ $# -gt 0 ]]; do
@@ -56,6 +57,7 @@ while [[ $# -gt 0 ]]; do
         --mid-training-only) MID_TRAINING_ONLY=true; shift ;;
         --rlvr-only) RLVR_ONLY=true; shift ;;
         --atropos) USE_ATROPOS=true; shift ;;
+        --kill-python|--kill) KILL_PYTHON=true; shift ;;
         --samples) MAX_SAMPLES="$2"; shift 2 ;;
         --batch) BATCH_SIZE="$2"; shift 2 ;;
         --epochs) EPOCHS="$2"; shift 2 ;;
@@ -86,6 +88,42 @@ log_warn() {
 
 log_error() {
     echo -e "${CYAN}[$(date '+%Y-%m-%d %H:%M:%S')]${NC} ${RED}ERROR${NC} | $1"
+}
+
+kill_python_processes() {
+    log_header "KILLING PYTHON PROCESSES"
+
+    # Показываем что сейчас запущено
+    log_info "Current Python processes:"
+    ps aux | grep -E "[p]ython|[v]llm" | head -20 || true
+
+    # Показываем использование GPU до очистки
+    log_info "GPU memory before cleanup:"
+    nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader 2>/dev/null || true
+
+    # Убиваем все Python процессы
+    log_info "Killing all Python processes..."
+    pkill -9 -f "python" 2>/dev/null || true
+    pkill -9 -f "vllm" 2>/dev/null || true
+
+    # Ждём завершения
+    sleep 3
+
+    # Очищаем GPU память через nvidia-smi (если есть зависшие процессы)
+    log_info "Forcing GPU memory release..."
+    nvidia-smi --gpu-reset 2>/dev/null || true
+
+    # Дополнительная пауза
+    sleep 2
+
+    # Показываем результат
+    log_info "GPU memory after cleanup:"
+    nvidia-smi --query-gpu=memory.used,memory.free --format=csv,noheader 2>/dev/null || true
+
+    log_info "Remaining Python processes:"
+    ps aux | grep -E "[p]ython|[v]llm" | head -10 || echo "  (none)"
+
+    log_info "Python processes killed and GPU memory cleared"
 }
 
 check_gpu() {
@@ -369,6 +407,11 @@ main() {
     log_header "GIGACHAT AGENTIC TRAINING"
     echo -e "${CYAN}Start time: $(date)${NC}"
     echo ""
+
+    # Kill Python processes if requested
+    if [ "$KILL_PYTHON" = true ]; then
+        kill_python_processes
+    fi
 
     # Check GPU
     check_gpu
