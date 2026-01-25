@@ -1,10 +1,14 @@
 # GigaChat Agentic Training Requirements
 # Python 3.10+
 
-# Core ML
-torch>=2.2.0
+# Core ML (torch>=2.6 for native Muon optimizer support)
+torch>=2.6.0
 torchvision>=0.17.0
 torchaudio>=2.2.0
+
+# Muon optimizer (fallback if torch.optim.Muon not available)
+# pip install git+https://github.com/KellerJordan/Muon
+muon @ git+https://github.com/KellerJordan/Muon
 
 # Transformers ecosystem
 transformers>=4.45.0

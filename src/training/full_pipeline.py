@@ -234,6 +234,302 @@ class MetricsTracker:
             "global_loss": self.global_avg_loss,
         }
 
+
+# ============================================================================
+# MUON OPTIMIZER
+# ============================================================================
+
+def get_muon_optimizer(
+    model,
+    muon_lr: float = 0.02,
+    adamw_lr: float = 2e-4,
+    muon_momentum: float = 0.95,
+    adamw_betas: Tuple[float, float] = (0.9, 0.95),
+    weight_decay: float = 0.01,
+    logger=None,
+):
+    """
+    Create Muon + AdamW optimizer for transformer training.
+
+    Muon is used for hidden layer weights (linear projections).
+    AdamW is used for embeddings, layer norms, biases, and lm_head.
+
+    Based on: https://github.com/KellerJordan/Muon
+    Paper: "Muon is Scalable for LLM Training" (arXiv:2502.16982)
+
+    Benefits:
+    - ~2x computational efficiency vs AdamW
+    - Better with large batch sizes
+    - 10-15% fewer tokens to reach same loss
+
+    Args:
+        model: The model to optimize
+        muon_lr: Learning rate for Muon (hidden weights), typically 0.02
+        adamw_lr: Learning rate for AdamW (embeddings, etc.), typically 2e-4
+        muon_momentum: Momentum for Muon
+        adamw_betas: Betas for AdamW
+        weight_decay: Weight decay for both optimizers
+
+    Returns:
+        Combined optimizer (MuonAdamW wrapper)
+    """
+
+    # Try to import Muon
+    Muon = None
+
+    # First try native PyTorch Muon (torch >= 2.6)
+    try:
+        from torch.optim import Muon as TorchMuon
+        Muon = TorchMuon
+        muon_source = "torch.optim.Muon (native)"
+    except ImportError:
+        pass
+
+    # Fallback to KellerJordan/Muon package
+    if Muon is None:
+        try:
+            from muon import Muon as MuonPackage
+            Muon = MuonPackage
+            muon_source = "muon package (KellerJordan/Muon)"
+        except ImportError:
+            pass
+
+    # If Muon not available, fall back to AdamW
+    if Muon is None:
+        if logger:
+            logger.warning(Colors.warning(
+                "⚠ Muon optimizer not available. Install with: "
+                "pip install git+https://github.com/KellerJordan/Muon"
+            ))
+            logger.warning("Falling back to AdamW optimizer")
+        from torch.optim import AdamW
+        return AdamW(model.parameters(), lr=adamw_lr, weight_decay=weight_decay, betas=adamw_betas)
+
+    if logger:
+        logger.info(Colors.success(f"✓ Using Muon optimizer ({muon_source})"))
+
+    # Separate parameters into Muon and AdamW groups
+    muon_params = []
+    adamw_params = []
+    muon_param_names = []
+    adamw_param_names = []
+
+    # Patterns for Muon (hidden layer weights - 2D tensors in linear layers)
+    muon_patterns = [
+        "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
+        "gate_proj.weight", "up_proj.weight", "down_proj.weight",
+        "query.weight", "key.weight", "value.weight",  # Alternative names
+        "dense.weight", "fc1.weight", "fc2.weight",  # MLP patterns
+        "w1.weight", "w2.weight", "w3.weight",  # Some architectures
+    ]
+
+    # Patterns that should ALWAYS use AdamW (embeddings, norms, biases, heads)
+    adamw_patterns = [
+        "embed", "lm_head", "norm", "layernorm", "ln_",
+        "bias", "wte", "wpe", "position", "token_type",
+    ]
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+
+        name_lower = name.lower()
+
+        # Check if should use AdamW (embeddings, norms, biases)
+        use_adamw = any(pattern in name_lower for pattern in adamw_patterns)
+
+        # Check if 1D tensor (biases, layer norms) - always AdamW
+        if param.ndim == 1:
+            use_adamw = True
+
+        # Check if it's a 2D weight that matches Muon patterns
+        use_muon = (
+            param.ndim == 2 and
+            not use_adamw and
+            any(pattern in name_lower for pattern in muon_patterns)
+        )
+
+        if use_muon:
+            muon_params.append(param)
+            muon_param_names.append(name)
+        else:
+            adamw_params.append(param)
+            adamw_param_names.append(name)
+
+    if logger:
+        logger.info(f"Muon params: {len(muon_params)} tensors")
+        logger.info(f"AdamW params: {len(adamw_params)} tensors")
+
+        # Log parameter counts
+        muon_param_count = sum(p.numel() for p in muon_params)
+        adamw_param_count = sum(p.numel() for p in adamw_params)
+        total_params = muon_param_count + adamw_param_count
+
+        logger.info(f"Muon parameters: {muon_param_count / 1e6:.2f}M ({100 * muon_param_count / total_params:.1f}%)")
+        logger.info(f"AdamW parameters: {adamw_param_count / 1e6:.2f}M ({100 * adamw_param_count / total_params:.1f}%)")
+
+    # Create optimizers
+    from torch.optim import AdamW
+
+    optimizers = []
+
+    if muon_params:
+        # Muon optimizer for hidden weights
+        try:
+            muon_opt = Muon(
+                muon_params,
+                lr=muon_lr,
+                momentum=muon_momentum,
+                weight_decay=weight_decay,
+            )
+            optimizers.append(("muon", muon_opt))
+            if logger:
+                logger.info(f"Muon LR: {muon_lr}, momentum: {muon_momentum}")
+        except Exception as e:
+            if logger:
+                logger.warning(f"Failed to create Muon optimizer: {e}")
+                logger.warning("Adding Muon params to AdamW instead")
+            adamw_params.extend(muon_params)
+
+    if adamw_params:
+        # AdamW optimizer for embeddings, norms, biases
+        try:
+            adamw_opt = AdamW(
+                adamw_params,
+                lr=adamw_lr,
+                betas=adamw_betas,
+                weight_decay=weight_decay,
+                fused=True,  # Use fused implementation on GPU
+            )
+        except TypeError:
+            adamw_opt = AdamW(
+                adamw_params,
+                lr=adamw_lr,
+                betas=adamw_betas,
+                weight_decay=weight_decay,
+            )
+        optimizers.append(("adamw", adamw_opt))
+        if logger:
+            logger.info(f"AdamW LR: {adamw_lr}, betas: {adamw_betas}")
+
+    # Return combined optimizer wrapper
+    return MuonAdamWOptimizer(optimizers, logger)
+
+
+class MuonAdamWOptimizer:
+    """
+    Wrapper that combines Muon and AdamW optimizers.
+    Provides a unified interface for training.
+    """
+
+    def __init__(self, optimizers: list, logger=None):
+        """
+        Args:
+            optimizers: List of (name, optimizer) tuples
+        """
+        self.optimizers = optimizers
+        self.logger = logger
+        self._step_count = 0
+
+    def zero_grad(self, set_to_none: bool = True):
+        """Zero gradients for all optimizers"""
+        for name, opt in self.optimizers:
+            opt.zero_grad(set_to_none=set_to_none)
+
+    def step(self):
+        """Perform optimization step for all optimizers"""
+        for name, opt in self.optimizers:
+            opt.step()
+        self._step_count += 1
+
+    def state_dict(self) -> Dict:
+        """Get state dict for all optimizers"""
+        return {
+            name: opt.state_dict()
+            for name, opt in self.optimizers
+        }
+
+    def load_state_dict(self, state_dict: Dict):
+        """Load state dict for all optimizers"""
+        for name, opt in self.optimizers:
+            if name in state_dict:
+                opt.load_state_dict(state_dict[name])
+
+    @property
+    def param_groups(self) -> list:
+        """Get all parameter groups"""
+        groups = []
+        for name, opt in self.optimizers:
+            groups.extend(opt.param_groups)
+        return groups
+
+    def get_lr(self) -> Dict[str, float]:
+        """Get learning rates for each optimizer"""
+        lrs = {}
+        for name, opt in self.optimizers:
+            lrs[name] = opt.param_groups[0]['lr']
+        return lrs
+
+
+def get_muon_schedulers(
+    optimizer: MuonAdamWOptimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+):
+    """
+    Create learning rate schedulers for Muon+AdamW optimizer.
+
+    Args:
+        optimizer: MuonAdamWOptimizer instance
+        num_warmup_steps: Number of warmup steps
+        num_training_steps: Total number of training steps
+
+    Returns:
+        MuonAdamWScheduler wrapper
+    """
+    from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
+
+    schedulers = []
+
+    for name, opt in optimizer.optimizers:
+        if name == "muon":
+            # Cosine schedule works well with Muon
+            scheduler = get_cosine_schedule_with_warmup(
+                opt,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+        else:
+            # Linear schedule for AdamW
+            scheduler = get_linear_schedule_with_warmup(
+                opt,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+        schedulers.append((name, scheduler))
+
+    return MuonAdamWScheduler(schedulers)
+
+
+class MuonAdamWScheduler:
+    """Wrapper for multiple schedulers"""
+
+    def __init__(self, schedulers: list):
+        self.schedulers = schedulers
+
+    def step(self):
+        """Step all schedulers"""
+        for name, sched in self.schedulers:
+            sched.step()
+
+    def get_last_lr(self) -> list:
+        """Get last learning rate from all schedulers"""
+        lrs = []
+        for name, sched in self.schedulers:
+            lrs.extend(sched.get_last_lr())
+        return lrs
+
+
 # Настройка логирования
 def setup_logging(output_dir: str, name: str = "pipeline"):
     """Настройка детального логирования"""
@@ -442,6 +738,12 @@ class PipelineConfig:
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
+
+    # Muon Optimizer (https://github.com/KellerJordan/Muon)
+    # Muon is ~2x more efficient than AdamW for hidden layer weights
+    use_muon: bool = True  # Use Muon+AdamW hybrid optimizer
+    muon_lr: float = 0.02  # Muon typically uses higher LR
+    muon_momentum: float = 0.95  # Muon momentum parameter
 
     # Logging & Checkpoints
     logging_steps: int = 1
@@ -1030,33 +1332,42 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
         pin_memory=True
     )
 
-    # Optimizer with fused AdamW for better performance
-    from torch.optim import AdamW
-    from transformers import get_linear_schedule_with_warmup
-
-    # Try to use fused AdamW for better performance on GPU
-    try:
-        optimizer = AdamW(
-            model.parameters(),
-            lr=config.mid_training_lr,
-            weight_decay=config.weight_decay,
-            fused=True  # Fused implementation for GPU
-        )
-        logger.info(Colors.success("✓ Using fused AdamW optimizer"))
-    except TypeError:
-        optimizer = AdamW(
-            model.parameters(),
-            lr=config.mid_training_lr,
-            weight_decay=config.weight_decay
-        )
-
+    # Calculate steps for scheduler
     total_steps = len(dataloader) * config.mid_training_epochs // config.mid_training_grad_accum
     warmup_steps = int(total_steps * config.warmup_ratio)
 
-    scheduler = get_linear_schedule_with_warmup(
+    # Muon + AdamW optimizer
+    # Muon for hidden layer weights (~2x efficiency vs AdamW)
+    # AdamW for embeddings, norms, biases
+    print_box(
+        "OPTIMIZER: MUON + AdamW",
+        [
+            f"Muon: Hidden layer weights (q/k/v/o_proj, gate/up/down_proj)",
+            f"AdamW: Embeddings, LayerNorms, biases, lm_head",
+            "",
+            f"Muon LR: {Colors.CYAN}{config.muon_lr}{Colors.END} (cosine schedule)",
+            f"Muon momentum: {config.muon_momentum}",
+            f"AdamW LR: {Colors.CYAN}{config.mid_training_lr}{Colors.END} (linear schedule)",
+            f"Weight decay: {config.weight_decay}",
+            "",
+            f"{Colors.GREEN}Benefits: ~2x efficiency vs pure AdamW{Colors.END}",
+        ],
+        width=70
+    )
+
+    optimizer = get_muon_optimizer(
+        model,
+        muon_lr=config.muon_lr,
+        adamw_lr=config.mid_training_lr,
+        muon_momentum=config.muon_momentum,
+        weight_decay=config.weight_decay,
+        logger=logger,
+    )
+
+    scheduler = get_muon_schedulers(
         optimizer,
         num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
+        num_training_steps=total_steps,
     )
 
     # Training configuration summary
