@@ -857,7 +857,10 @@ class FullRLVRTrainer:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         if self.config.use_lora:
-            self.model = prepare_model_for_kbit_training(self.model)
+            self.model = prepare_model_for_kbit_training(
+                self.model,
+                use_gradient_checkpointing=False  # Disable for MoE models
+            )
             lora_config = LoraConfig(
                 r=self.config.lora_r,
                 lora_alpha=self.config.lora_alpha,
@@ -869,6 +872,10 @@ class FullRLVRTrainer:
             )
             self.model = get_peft_model(self.model, lora_config)
             self.model.print_trainable_parameters()
+
+        # Explicitly disable gradient checkpointing (causes dtype issues with MoE)
+        if hasattr(self.model, 'gradient_checkpointing_disable'):
+            self.model.gradient_checkpointing_disable()
 
         self.model.train()
 
@@ -902,31 +909,36 @@ class FullRLVRTrainer:
         if response_len <= 0:
             return torch.tensor(0.0, device=self.device), 0.0, 0.0
 
-        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+        try:
+            # Forward pass without autocast (MoE models have dtype issues)
             outputs = self.model(
                 input_ids=encoded["input_ids"],
                 attention_mask=encoded["attention_mask"],
             )
 
-        logits = outputs.logits[:, prompt_len - 1:-1, :]
-        target_ids = encoded["input_ids"][:, prompt_len:]
+            logits = outputs.logits[:, prompt_len - 1:-1, :].float()  # Cast to float32
+            target_ids = encoded["input_ids"][:, prompt_len:]
 
-        log_probs = F.log_softmax(logits, dim=-1)
-        token_log_probs = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
-        response_log_prob = token_log_probs.sum()
+            log_probs = F.log_softmax(logits, dim=-1)
+            token_log_probs = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
+            response_log_prob = token_log_probs.sum()
 
-        # Entropy
-        probs = F.softmax(logits, dim=-1)
-        entropy = -(probs * log_probs).sum(dim=-1).mean()
+            # Entropy
+            probs = F.softmax(logits, dim=-1)
+            entropy = -(probs * log_probs).sum(dim=-1).mean()
 
-        # Advantage
-        advantage = (reward - self.running_baseline) * self.config.reward_scale
+            # Advantage
+            advantage = (reward - self.running_baseline) * self.config.reward_scale
 
-        # Policy loss
-        policy_loss = -advantage * response_log_prob
-        entropy_loss = -self.config.entropy_coef * entropy
+            # Policy loss
+            policy_loss = -advantage * response_log_prob
+            entropy_loss = -self.config.entropy_coef * entropy
 
-        total_loss = policy_loss + entropy_loss
+            total_loss = policy_loss + entropy_loss
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                torch.cuda.empty_cache()
+            return torch.tensor(0.0, device=self.device, requires_grad=True), 0.0, 0.0
 
         return total_loss, entropy.item(), advantage
 
