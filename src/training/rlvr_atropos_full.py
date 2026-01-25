@@ -565,14 +565,78 @@ class RolloutEnvironment:
     def _load_dataset(self, dataset_name: str, max_samples: int):
         """Load dataset"""
         print(f"  Loading dataset: {dataset_name}")
+        self.samples = []
+
         try:
-            dataset = load_dataset(dataset_name, split="train", trust_remote_code=True)
-            self.samples = list(dataset)[:max_samples]
+            # Try loading tool_calling split first (main data for RLVR)
+            try:
+                dataset = load_dataset(dataset_name, "tool_calling", split="train")
+                self.samples.extend(list(dataset)[:max_samples])
+                print(f"    Loaded {len(self.samples)} from tool_calling split")
+            except Exception:
+                pass
+
+            # Try interactive_agent split
+            if len(self.samples) < max_samples:
+                try:
+                    dataset = load_dataset(dataset_name, "interactive_agent", split="train")
+                    remaining = max_samples - len(self.samples)
+                    self.samples.extend(list(dataset)[:remaining])
+                    print(f"    Loaded samples from interactive_agent split")
+                except Exception:
+                    pass
+
+            # Fallback: try default split
+            if not self.samples:
+                try:
+                    dataset = load_dataset(dataset_name, split="train")
+                    self.samples = list(dataset)[:max_samples]
+                except Exception:
+                    pass
+
+            # Final fallback: load from local or generate synthetic
+            if not self.samples:
+                print(f"  {Colors.warning('⚠')} Could not load dataset, using synthetic data")
+                self.samples = self._generate_synthetic_samples(max_samples)
+
             random.shuffle(self.samples)
-            print(f"  {Colors.success('✓')} Loaded {len(self.samples)} samples")
+            print(f"  {Colors.success('✓')} Loaded {len(self.samples)} samples total")
+
         except Exception as e:
             print(f"  {Colors.error('✗')} Error loading dataset: {e}")
-            self.samples = []
+            print(f"  {Colors.warning('⚠')} Using synthetic data")
+            self.samples = self._generate_synthetic_samples(max_samples)
+
+    def _generate_synthetic_samples(self, num_samples: int) -> List[Dict]:
+        """Generate synthetic tool-calling samples for testing"""
+        tools = [
+            {"name": "get_weather", "args": {"city": "Moscow"}},
+            {"name": "search_web", "args": {"query": "Python tutorials"}},
+            {"name": "calculate", "args": {"expression": "2 + 2"}},
+            {"name": "get_time", "args": {"timezone": "UTC"}},
+            {"name": "translate", "args": {"text": "Hello", "to": "ru"}},
+        ]
+
+        prompts = [
+            "What's the weather like in Moscow?",
+            "Search for Python tutorials",
+            "Calculate 2 + 2",
+            "What time is it in UTC?",
+            "Translate 'Hello' to Russian",
+        ]
+
+        samples = []
+        for i in range(num_samples):
+            idx = i % len(tools)
+            tool = tools[idx]
+            samples.append({
+                "messages": [
+                    {"role": "user", "content": prompts[idx]},
+                    {"role": "assistant", "content": f'<tool_call>\n{json.dumps(tool)}\n</tool_call>'}
+                ]
+            })
+
+        return samples
 
     def _format_prompt(self, sample: Dict) -> Tuple[str, List[Dict]]:
         """Format sample into prompt and extract expected tools"""
@@ -639,6 +703,11 @@ Think step by step before making tool calls."""
         """Generate rollouts continuously"""
         self.running = True
         sample_idx = 0
+
+        # Check if we have samples
+        if not self.samples:
+            print(f"  {Colors.error('✗')} No samples available, cannot generate rollouts")
+            return
 
         while self.running:
             if num_rollouts and self.stats["rollouts_generated"] >= num_rollouts:
