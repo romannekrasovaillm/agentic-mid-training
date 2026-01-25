@@ -3,24 +3,236 @@
 GigaChat Full Training Pipeline
 Mid-Training + RLVR Post-Training
 
-Полный пайплайн с детальным логированием
+Полный пайплайн с детальным логированием и метриками CLM
 """
 
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
+
+
+# ============================================================================
+# TERMINAL COLORS AND FORMATTING
+# ============================================================================
+
+class Colors:
+    """ANSI color codes for beautiful terminal output"""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    UNDERLINE = '\033[4m'
+    END = '\033[0m'
+
+    @staticmethod
+    def colored(text: str, color: str) -> str:
+        return f"{color}{text}{Colors.END}"
+
+    @staticmethod
+    def bold(text: str) -> str:
+        return f"{Colors.BOLD}{text}{Colors.END}"
+
+    @staticmethod
+    def header(text: str) -> str:
+        return f"{Colors.BOLD}{Colors.CYAN}{text}{Colors.END}"
+
+    @staticmethod
+    def success(text: str) -> str:
+        return f"{Colors.GREEN}{text}{Colors.END}"
+
+    @staticmethod
+    def warning(text: str) -> str:
+        return f"{Colors.YELLOW}{text}{Colors.END}"
+
+    @staticmethod
+    def error(text: str) -> str:
+        return f"{Colors.RED}{text}{Colors.END}"
+
+    @staticmethod
+    def metric(name: str, value: str) -> str:
+        return f"{Colors.DIM}{name}:{Colors.END} {Colors.BOLD}{value}{Colors.END}"
+
+
+def print_box(title: str, content: list, width: int = 70):
+    """Print a beautiful box with title and content"""
+    border = "═" * width
+    print(f"\n{Colors.CYAN}╔{border}╗{Colors.END}")
+    print(f"{Colors.CYAN}║{Colors.END} {Colors.BOLD}{title.center(width - 2)}{Colors.END} {Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.CYAN}╠{border}╣{Colors.END}")
+    for line in content:
+        padding = width - 2 - len(line.replace('\033[', '').split('m')[-1] if '\033[' in line else line)
+        # Strip ANSI codes for length calculation
+        import re
+        clean_line = re.sub(r'\033\[[0-9;]*m', '', line)
+        padding = width - 2 - len(clean_line)
+        print(f"{Colors.CYAN}║{Colors.END} {line}{' ' * max(0, padding)} {Colors.CYAN}║{Colors.END}")
+    print(f"{Colors.CYAN}╚{border}╝{Colors.END}\n")
+
+
+def print_separator(char: str = "─", width: int = 70):
+    """Print a separator line"""
+    print(f"{Colors.DIM}{char * width}{Colors.END}")
+
+
+def format_number(num: float, precision: int = 4) -> str:
+    """Format number with color based on magnitude"""
+    if abs(num) < 0.0001:
+        return f"{num:.2e}"
+    elif abs(num) < 1:
+        return f"{num:.{precision}f}"
+    elif abs(num) < 1000:
+        return f"{num:.{min(precision, 2)}f}"
+    else:
+        return f"{num:.2e}"
+
+
+def format_time(seconds: float) -> str:
+    """Format time duration"""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins}m {secs}s"
+    else:
+        hours = int(seconds // 3600)
+        mins = int((seconds % 3600) // 60)
+        return f"{hours}h {mins}m"
+
+
+# ============================================================================
+# METRICS TRACKER
+# ============================================================================
+
+class MetricsTracker:
+    """Track and compute training metrics for Causal Language Modeling"""
+
+    def __init__(self, window_size: int = 100):
+        self.window_size = window_size
+        self.reset()
+
+    def reset(self):
+        """Reset all metrics"""
+        self.losses = deque(maxlen=self.window_size)
+        self.token_accuracies = deque(maxlen=self.window_size)
+        self.gradient_norms = deque(maxlen=self.window_size)
+        self.tokens_per_second = deque(maxlen=self.window_size)
+        self.batch_sizes = deque(maxlen=self.window_size)
+
+        self.total_tokens = 0
+        self.total_correct_tokens = 0
+        self.total_loss = 0.0
+        self.total_steps = 0
+        self.start_time = time.time()
+
+    def update(
+        self,
+        loss: float,
+        num_tokens: int,
+        correct_tokens: int = 0,
+        gradient_norm: float = 0.0,
+        batch_time: float = 0.0,
+        batch_size: int = 1
+    ):
+        """Update metrics with new batch results"""
+        self.losses.append(loss)
+        self.total_loss += loss
+        self.total_steps += 1
+
+        self.total_tokens += num_tokens
+        self.total_correct_tokens += correct_tokens
+
+        if correct_tokens > 0:
+            self.token_accuracies.append(correct_tokens / max(num_tokens, 1))
+
+        if gradient_norm > 0:
+            self.gradient_norms.append(gradient_norm)
+
+        if batch_time > 0:
+            self.tokens_per_second.append(num_tokens / batch_time)
+
+        self.batch_sizes.append(batch_size)
+
+    @property
+    def avg_loss(self) -> float:
+        """Average loss over window"""
+        return sum(self.losses) / max(len(self.losses), 1)
+
+    @property
+    def perplexity(self) -> float:
+        """Perplexity = exp(avg_loss)"""
+        return math.exp(min(self.avg_loss, 20))  # Clip to avoid overflow
+
+    @property
+    def bits_per_byte(self) -> float:
+        """Bits per byte ≈ loss / ln(2)"""
+        return self.avg_loss / math.log(2)
+
+    @property
+    def token_accuracy(self) -> float:
+        """Average token accuracy over window"""
+        if not self.token_accuracies:
+            return 0.0
+        return sum(self.token_accuracies) / len(self.token_accuracies)
+
+    @property
+    def global_token_accuracy(self) -> float:
+        """Global token accuracy"""
+        if self.total_tokens == 0:
+            return 0.0
+        return self.total_correct_tokens / self.total_tokens
+
+    @property
+    def avg_gradient_norm(self) -> float:
+        """Average gradient norm over window"""
+        if not self.gradient_norms:
+            return 0.0
+        return sum(self.gradient_norms) / len(self.gradient_norms)
+
+    @property
+    def throughput(self) -> float:
+        """Tokens per second"""
+        if not self.tokens_per_second:
+            elapsed = time.time() - self.start_time
+            return self.total_tokens / max(elapsed, 1)
+        return sum(self.tokens_per_second) / len(self.tokens_per_second)
+
+    @property
+    def global_avg_loss(self) -> float:
+        """Global average loss"""
+        return self.total_loss / max(self.total_steps, 1)
+
+    def get_summary(self) -> Dict[str, float]:
+        """Get all metrics as dict"""
+        return {
+            "loss": self.avg_loss,
+            "perplexity": self.perplexity,
+            "bits_per_byte": self.bits_per_byte,
+            "token_accuracy": self.token_accuracy,
+            "gradient_norm": self.avg_gradient_norm,
+            "throughput_tps": self.throughput,
+            "total_tokens": self.total_tokens,
+            "global_loss": self.global_avg_loss,
+        }
 
 # Настройка логирования
 def setup_logging(output_dir: str, name: str = "pipeline"):
@@ -92,11 +304,77 @@ def clear_gpu_memory(logger):
 
 def log_system_info(logger):
     """Логирование системной информации"""
+
+    # Collect system info
+    system_info = []
+
+    # Python and PyTorch
+    system_info.append(f"Python: {Colors.BOLD}{sys.version.split()[0]}{Colors.END}")
+    system_info.append(f"PyTorch: {Colors.BOLD}{torch.__version__}{Colors.END}")
+
+    # CUDA
+    if torch.cuda.is_available():
+        system_info.append(f"CUDA: {Colors.BOLD}{torch.version.cuda}{Colors.END}")
+        system_info.append("")
+
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            gpu_name = props.name
+            gpu_mem = props.total_memory / 1e9
+
+            # Highlight H100
+            if "H100" in gpu_name:
+                gpu_str = f"{Colors.GREEN}{gpu_name}{Colors.END}"
+            else:
+                gpu_str = gpu_name
+
+            system_info.append(f"GPU {i}: {gpu_str} ({gpu_mem:.0f}GB)")
+
+        # Compute capability
+        cc = torch.cuda.get_device_capability(0)
+        system_info.append(f"Compute Capability: {cc[0]}.{cc[1]}")
+    else:
+        system_info.append(f"{Colors.RED}CUDA: Not available{Colors.END}")
+
+    system_info.append("")
+
+    # Flash Attention
+    try:
+        import flash_attn
+        fa_version = flash_attn.__version__
+        system_info.append(f"Flash Attention: {Colors.GREEN}✓ v{fa_version}{Colors.END}")
+    except ImportError:
+        system_info.append(f"Flash Attention: {Colors.YELLOW}✗ Not installed{Colors.END}")
+
+    # Transformers
+    try:
+        import transformers
+        system_info.append(f"Transformers: {transformers.__version__}")
+    except ImportError:
+        pass
+
+    # PEFT
+    try:
+        import peft
+        system_info.append(f"PEFT: {peft.__version__}")
+    except ImportError:
+        pass
+
+    # BitsAndBytes
+    try:
+        import bitsandbytes
+        system_info.append(f"BitsAndBytes: {bitsandbytes.__version__}")
+    except ImportError:
+        pass
+
+    # Print beautiful box
+    print_box("SYSTEM INFORMATION", system_info, width=60)
+
+    # Also log to file (without colors)
     logger.info("=" * 60)
     logger.info("SYSTEM INFORMATION")
     logger.info("=" * 60)
-
-    logger.info(f"Python: {sys.version}")
+    logger.info(f"Python: {sys.version.split()[0]}")
     logger.info(f"PyTorch: {torch.__version__}")
     logger.info(f"CUDA available: {torch.cuda.is_available()}")
 
@@ -106,6 +384,13 @@ def log_system_info(logger):
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
             logger.info(f"GPU {i}: {props.name}, {props.total_memory / 1e9:.1f}GB")
+
+    # Flash Attention check
+    try:
+        import flash_attn
+        logger.info(f"Flash Attention: {flash_attn.__version__}")
+    except ImportError:
+        logger.info("Flash Attention: Not installed")
 
     logger.info("=" * 60)
 
@@ -391,17 +676,30 @@ def load_model_and_tokenizer(config: PipelineConfig, logger):
     }
     torch_dtype = dtype_map.get(config.dtype, torch.bfloat16)
 
+    # Выбор реализации attention (Flash Attention 2 для H100)
+    attn_impl = "flash_attention_2"
+    try:
+        # Проверяем доступность Flash Attention 2
+        import flash_attn
+        logger.info(f"Flash Attention version: {flash_attn.__version__}")
+        logger.info(Colors.success("✓ Flash Attention 2 доступен"))
+    except ImportError:
+        logger.warning(Colors.warning("⚠ Flash Attention 2 не установлен, используем SDPA"))
+        attn_impl = "sdpa"
+
     # Принудительно загружаем всё на GPU (H100 80GB)
     # device_map="auto" может выгружать на CPU, что замедляет обучение
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
         torch_dtype=torch_dtype,
         trust_remote_code=True,
-        attn_implementation="sdpa",
+        attn_implementation=attn_impl,
         device_map={"": 0},  # Всё на GPU 0
         cache_dir=config.cache_dir,
         low_cpu_mem_usage=True,
     )
+
+    logger.info(f"Attention implementation: {Colors.bold(attn_impl)}")
 
     logger.info(f"Модель загружена за {time.time() - start_time:.1f}s")
     log_gpu_memory(logger, "После загрузки модели: ")
@@ -455,6 +753,33 @@ def apply_lora(model, config: PipelineConfig, logger):
     return model
 
 
+def compute_token_accuracy(logits: torch.Tensor, labels: torch.Tensor) -> Tuple[int, int]:
+    """
+    Compute token-level accuracy (top-1).
+
+    Args:
+        logits: Model output logits [batch, seq_len, vocab_size]
+        labels: Target labels [batch, seq_len]
+
+    Returns:
+        (correct_tokens, total_tokens)
+    """
+    # Shift for causal LM: predict next token
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous()
+
+    # Get predictions
+    predictions = shift_logits.argmax(dim=-1)
+
+    # Mask padding tokens (usually -100)
+    mask = shift_labels != -100
+
+    correct = ((predictions == shift_labels) & mask).sum().item()
+    total = mask.sum().item()
+
+    return correct, total
+
+
 def train_epoch(
     model,
     dataloader,
@@ -465,84 +790,237 @@ def train_epoch(
     epoch: int,
     stage: str = "mid-training"
 ):
-    """Обучение одной эпохи"""
+    """
+    Обучение одной эпохи с расширенными метриками CLM.
+
+    Метрики:
+    - Loss: Cross-entropy loss
+    - Perplexity: exp(loss)
+    - BPB: Bits per byte
+    - Token Accuracy: % правильно предсказанных токенов
+    - Gradient Norm: Норма градиентов
+    - Throughput: Токенов в секунду
+    """
     model.train()
 
-    total_loss = 0.0
-    num_steps = 0
+    # Initialize metrics tracker
+    metrics = MetricsTracker(window_size=100)
     grad_accum_steps = config.mid_training_grad_accum
 
     optimizer.zero_grad()
 
+    # Beautiful progress bar
     progress_bar = tqdm(
         dataloader,
-        desc=f"Epoch {epoch + 1} [{stage}]",
+        desc=f"{Colors.CYAN}Epoch {epoch + 1}{Colors.END} [{stage}]",
         leave=True,
-        file=sys.stdout
+        file=sys.stdout,
+        bar_format="{l_bar}{bar:30}{r_bar}",
+        ncols=120
     )
+
+    epoch_start_time = time.time()
+    batch_start_time = time.time()
 
     for step, batch in enumerate(progress_bar):
         # Move to device
         batch = {k: v.to(model.device) for k, v in batch.items()}
 
-        # Forward pass
-        outputs = model(**batch)
-        loss = outputs.loss / grad_accum_steps
+        # Count tokens (excluding padding)
+        attention_mask = batch.get("attention_mask", None)
+        if attention_mask is not None:
+            num_tokens = attention_mask.sum().item()
+        else:
+            num_tokens = batch["input_ids"].numel()
+
+        # Forward pass with autocast for mixed precision
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            outputs = model(**batch)
+            loss = outputs.loss / grad_accum_steps
+
+        # Compute token accuracy
+        with torch.no_grad():
+            correct_tokens, total_tokens = compute_token_accuracy(
+                outputs.logits, batch["labels"]
+            )
 
         # Backward pass
         loss.backward()
 
-        total_loss += outputs.loss.item()
-        num_steps += 1
+        # Calculate batch time
+        batch_time = time.time() - batch_start_time
+        batch_start_time = time.time()
 
         # Gradient accumulation step
         if (step + 1) % grad_accum_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+            # Compute gradient norm before clipping
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), config.max_grad_norm
+            ).item()
+
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
 
-            avg_loss = total_loss / num_steps
+            # Update metrics
+            metrics.update(
+                loss=outputs.loss.item(),
+                num_tokens=num_tokens,
+                correct_tokens=correct_tokens,
+                gradient_norm=grad_norm,
+                batch_time=batch_time * grad_accum_steps,
+                batch_size=batch["input_ids"].shape[0]
+            )
+
             current_lr = scheduler.get_last_lr()[0]
 
-            # Update progress bar
-            progress_bar.set_postfix({
-                'loss': f'{avg_loss:.4f}',
-                'lr': f'{current_lr:.2e}'
-            })
+            # Update progress bar with metrics
+            progress_bar.set_postfix_str(
+                f"loss={Colors.BOLD}{metrics.avg_loss:.4f}{Colors.END} | "
+                f"ppl={Colors.CYAN}{metrics.perplexity:.2f}{Colors.END} | "
+                f"acc={Colors.GREEN}{metrics.token_accuracy*100:.1f}%{Colors.END} | "
+                f"∇={metrics.avg_gradient_norm:.2f} | "
+                f"lr={current_lr:.2e} | "
+                f"{metrics.throughput:.0f} tok/s"
+            )
 
-            # Детальное логирование
+            # Detailed logging at intervals
             if (step + 1) % (grad_accum_steps * config.logging_steps) == 0:
-                logger.info(
-                    f"[{stage}] Step {step + 1}/{len(dataloader)} | "
-                    f"Loss: {avg_loss:.4f} | LR: {current_lr:.2e}"
+                opt_step = (step + 1) // grad_accum_steps
+                total_opt_steps = len(dataloader) // grad_accum_steps
+
+                # Calculate ETA
+                elapsed = time.time() - epoch_start_time
+                steps_done = step + 1
+                steps_remaining = len(dataloader) - steps_done
+                eta = (elapsed / steps_done) * steps_remaining if steps_done > 0 else 0
+
+                # Print detailed metrics
+                print()  # New line for clean output
+                print_separator("─", 80)
+                print(
+                    f"  {Colors.BOLD}Step {opt_step}/{total_opt_steps}{Colors.END} "
+                    f"({Colors.DIM}{(step + 1) / len(dataloader) * 100:.1f}%{Colors.END}) "
+                    f"│ ETA: {Colors.CYAN}{format_time(eta)}{Colors.END}"
                 )
-                log_gpu_memory(logger, "  ")
+                print()
+
+                # Metrics table
+                metrics_str = [
+                    f"  {Colors.metric('Loss', format_number(metrics.avg_loss))}",
+                    f"  {Colors.metric('Perplexity', format_number(metrics.perplexity, 2))}",
+                    f"  {Colors.metric('Bits/Byte', format_number(metrics.bits_per_byte, 3))}",
+                    f"  {Colors.metric('Token Acc', f'{metrics.token_accuracy*100:.2f}%')}",
+                    f"  {Colors.metric('Grad Norm', format_number(metrics.avg_gradient_norm, 3))}",
+                    f"  {Colors.metric('Learning Rate', f'{current_lr:.2e}')}",
+                    f"  {Colors.metric('Throughput', f'{metrics.throughput:.0f} tokens/sec')}",
+                    f"  {Colors.metric('Total Tokens', f'{metrics.total_tokens:,}')}",
+                ]
+                for m in metrics_str:
+                    print(m)
+
+                # GPU memory
+                if torch.cuda.is_available():
+                    allocated = torch.cuda.memory_allocated() / 1e9
+                    reserved = torch.cuda.memory_reserved() / 1e9
+                    max_alloc = torch.cuda.max_memory_allocated() / 1e9
+                    print()
+                    print(
+                        f"  {Colors.DIM}GPU:{Colors.END} "
+                        f"{allocated:.1f}GB allocated / "
+                        f"{reserved:.1f}GB reserved / "
+                        f"{max_alloc:.1f}GB peak"
+                    )
+
+                print_separator("─", 80)
+                print()
+
+                # Also log to file
+                logger.info(
+                    f"[{stage}] Step {opt_step}/{total_opt_steps} | "
+                    f"Loss: {metrics.avg_loss:.4f} | "
+                    f"PPL: {metrics.perplexity:.2f} | "
+                    f"Acc: {metrics.token_accuracy*100:.2f}% | "
+                    f"∇: {metrics.avg_gradient_norm:.3f} | "
+                    f"LR: {current_lr:.2e} | "
+                    f"Throughput: {metrics.throughput:.0f} tok/s"
+                )
+        else:
+            # Still update metrics for non-optimization steps
+            metrics.update(
+                loss=outputs.loss.item(),
+                num_tokens=num_tokens,
+                correct_tokens=correct_tokens,
+                batch_time=batch_time
+            )
 
     # Final step if needed
     if (step + 1) % grad_accum_steps != 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            model.parameters(), config.max_grad_norm
+        ).item()
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
 
-    avg_loss = total_loss / max(num_steps, 1)
-    logger.info(f"[{stage}] Epoch {epoch + 1} завершена | Avg Loss: {avg_loss:.4f}")
+    # Epoch summary
+    epoch_time = time.time() - epoch_start_time
+    summary = metrics.get_summary()
 
-    return avg_loss
+    print()
+    print_box(
+        f"EPOCH {epoch + 1} COMPLETE",
+        [
+            f"Duration: {Colors.CYAN}{format_time(epoch_time)}{Colors.END}",
+            f"",
+            f"Final Metrics:",
+            f"  Loss:        {Colors.BOLD}{summary['global_loss']:.4f}{Colors.END}",
+            f"  Perplexity:  {Colors.CYAN}{math.exp(min(summary['global_loss'], 20)):.2f}{Colors.END}",
+            f"  Bits/Byte:   {summary['global_loss'] / math.log(2):.3f}",
+            f"  Token Acc:   {Colors.GREEN}{summary['token_accuracy']*100:.2f}%{Colors.END}",
+            f"",
+            f"Throughput: {Colors.BOLD}{summary['throughput_tps']:.0f}{Colors.END} tokens/sec",
+            f"Total Tokens: {summary['total_tokens']:,}",
+        ],
+        width=60
+    )
+
+    logger.info(
+        f"[{stage}] Epoch {epoch + 1} завершена | "
+        f"Loss: {summary['global_loss']:.4f} | "
+        f"PPL: {math.exp(min(summary['global_loss'], 20)):.2f} | "
+        f"Acc: {summary['token_accuracy']*100:.2f}% | "
+        f"Time: {format_time(epoch_time)}"
+    )
+
+    return summary['global_loss']
 
 
 def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
-    """Запуск Mid-Training"""
+    """Запуск Mid-Training (Continued Pre-Training with Next Token Prediction)"""
+
+    # Beautiful header
+    print_box(
+        "MID-TRAINING (Next Token Prediction)",
+        [
+            f"Method: {Colors.CYAN}Causal Language Modeling{Colors.END}",
+            f"Loss: Cross-entropy on ALL tokens",
+            f"Objective: Predict next token",
+            "",
+            f"Dataset: {Colors.BOLD}{config.dataset_name}{Colors.END}",
+            f"Model: {Colors.BOLD}{config.model_name}{Colors.END}",
+        ],
+        width=70
+    )
+
     logger.info("=" * 60)
-    logger.info("MID-TRAINING")
+    logger.info("MID-TRAINING (Next Token Prediction)")
     logger.info("=" * 60)
 
     # Загрузка данных (mid-training берёт первую часть датасета)
     samples = load_dataset_samples(config, logger, config.mid_training_max_samples, for_rlvr=False)
 
     dataset = AgenticDataset(samples, tokenizer, config.max_seq_length)
-    logger.info(f"Dataset size: {len(dataset)}")
 
     dataloader = DataLoader(
         dataset,
@@ -551,17 +1029,26 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
         num_workers=0,  # Avoid multiprocessing issues
         pin_memory=True
     )
-    logger.info(f"Batches per epoch: {len(dataloader)}")
 
-    # Optimizer
+    # Optimizer with fused AdamW for better performance
     from torch.optim import AdamW
     from transformers import get_linear_schedule_with_warmup
 
-    optimizer = AdamW(
-        model.parameters(),
-        lr=config.mid_training_lr,
-        weight_decay=config.weight_decay
-    )
+    # Try to use fused AdamW for better performance on GPU
+    try:
+        optimizer = AdamW(
+            model.parameters(),
+            lr=config.mid_training_lr,
+            weight_decay=config.weight_decay,
+            fused=True  # Fused implementation for GPU
+        )
+        logger.info(Colors.success("✓ Using fused AdamW optimizer"))
+    except TypeError:
+        optimizer = AdamW(
+            model.parameters(),
+            lr=config.mid_training_lr,
+            weight_decay=config.weight_decay
+        )
 
     total_steps = len(dataloader) * config.mid_training_epochs // config.mid_training_grad_accum
     warmup_steps = int(total_steps * config.warmup_ratio)
@@ -572,15 +1059,51 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
         num_training_steps=total_steps
     )
 
+    # Training configuration summary
+    effective_batch = config.mid_training_batch_size * config.mid_training_grad_accum
+    tokens_per_batch = effective_batch * config.max_seq_length
+
+    print_box(
+        "TRAINING CONFIGURATION",
+        [
+            f"Dataset size: {Colors.BOLD}{len(dataset):,}{Colors.END} samples",
+            f"Batches per epoch: {Colors.BOLD}{len(dataloader):,}{Colors.END}",
+            "",
+            f"Batch size: {config.mid_training_batch_size}",
+            f"Gradient accumulation: {config.mid_training_grad_accum}",
+            f"Effective batch: {Colors.CYAN}{effective_batch}{Colors.END}",
+            f"Tokens per batch: ~{tokens_per_batch:,}",
+            "",
+            f"Epochs: {Colors.BOLD}{config.mid_training_epochs}{Colors.END}",
+            f"Total optimization steps: {Colors.BOLD}{total_steps:,}{Colors.END}",
+            f"Warmup steps: {warmup_steps:,} ({config.warmup_ratio*100:.0f}%)",
+            "",
+            f"Learning rate: {Colors.CYAN}{config.mid_training_lr}{Colors.END}",
+            f"Weight decay: {config.weight_decay}",
+            f"Max gradient norm: {config.max_grad_norm}",
+        ],
+        width=70
+    )
+
+    logger.info(f"Dataset size: {len(dataset)}")
+    logger.info(f"Batches per epoch: {len(dataloader)}")
     logger.info(f"Total optimization steps: {total_steps}")
     logger.info(f"Warmup steps: {warmup_steps}")
     logger.info(f"Learning rate: {config.mid_training_lr}")
 
     # Training loop
+    training_start = time.time()
+
     for epoch in range(config.mid_training_epochs):
-        logger.info(f"\n{'='*40}")
-        logger.info(f"EPOCH {epoch + 1}/{config.mid_training_epochs}")
-        logger.info(f"{'='*40}")
+        print()
+        print_box(
+            f"EPOCH {epoch + 1} / {config.mid_training_epochs}",
+            [
+                f"Progress: {epoch}/{config.mid_training_epochs} complete",
+                f"Remaining: {config.mid_training_epochs - epoch} epochs",
+            ],
+            width=50
+        )
 
         avg_loss = train_epoch(
             model, dataloader, optimizer, scheduler,
@@ -606,6 +1129,23 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
                 config.save_total_limit,
                 logger
             )
+
+    # Training complete summary
+    total_time = time.time() - training_start
+
+    print()
+    print_box(
+        "MID-TRAINING COMPLETE",
+        [
+            f"{Colors.GREEN}✓ Training finished successfully{Colors.END}",
+            "",
+            f"Total time: {Colors.BOLD}{format_time(total_time)}{Colors.END}",
+            f"Epochs completed: {config.mid_training_epochs}",
+            "",
+            f"Final checkpoint: {config.output_dir}/mid-training-epoch-{config.mid_training_epochs}",
+        ],
+        width=70
+    )
 
     logger.info("Mid-Training завершен!")
     return model
