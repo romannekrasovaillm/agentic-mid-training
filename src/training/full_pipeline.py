@@ -150,6 +150,8 @@ class PipelineConfig:
     dataset_name: str = "nvidia/Nemotron-Agentic-v1"
     dataset_split: str = "tool_calling"
     max_seq_length: int = 1024  # Уменьшено для экономии памяти
+    dataset_split_seed: int = 42  # Seed для разделения датасета
+    rlvr_data_fraction: float = 0.5  # Доля данных для RLVR (mid-training берёт остаток)
 
     # Training
     warmup_ratio: float = 0.1
@@ -275,11 +277,27 @@ class AgenticDataset(Dataset):
         }
 
 
-def load_dataset_samples(config: PipelineConfig, logger, max_samples: int = None) -> list:
-    """Загрузка датасета"""
+def load_dataset_samples(config: PipelineConfig, logger, max_samples: int = None, for_rlvr: bool = False) -> list:
+    """
+    Загрузка датасета с разделением для mid-training и RLVR.
+
+    Dataset split to avoid memorization:
+    - Mid-training: first (1 - rlvr_data_fraction) portion
+    - RLVR: last (rlvr_data_fraction) portion
+
+    Args:
+        config: Pipeline configuration
+        logger: Logger instance
+        max_samples: Maximum samples to return
+        for_rlvr: If True, return RLVR portion; if False, return mid-training portion
+    """
     logger.info(f"Загрузка датасета: {config.dataset_name}")
+    logger.info(f"Dataset split seed: {config.dataset_split_seed}")
+    logger.info(f"RLVR data fraction: {config.rlvr_data_fraction}")
+    logger.info(f"Loading for: {'RLVR' if for_rlvr else 'Mid-Training'}")
 
     from huggingface_hub import hf_hub_download
+    import random
 
     file_path = hf_hub_download(
         repo_id=config.dataset_name,
@@ -290,25 +308,46 @@ def load_dataset_samples(config: PipelineConfig, logger, max_samples: int = None
 
     logger.info(f"Файл загружен: {file_path}")
 
-    samples = []
-    max_samples = max_samples or config.mid_training_max_samples
-
+    # Load all samples first
+    all_samples = []
     with open(file_path, 'r', encoding='utf-8') as f:
         for i, line in enumerate(f):
-            if i >= max_samples:
-                break
             try:
                 example = json.loads(line.strip())
                 if "messages" in example:
-                    samples.append({"messages": example["messages"]})
+                    all_samples.append({"messages": example["messages"]})
             except json.JSONDecodeError as e:
                 logger.warning(f"Ошибка парсинга строки {i}: {e}")
                 continue
 
-            if (i + 1) % 1000 == 0:
+            if (i + 1) % 10000 == 0:
                 logger.debug(f"Загружено {i + 1} примеров...")
 
-    logger.info(f"Загружено {len(samples)} примеров из датасета")
+    logger.info(f"Всего примеров в датасете: {len(all_samples)}")
+
+    # Shuffle with fixed seed for reproducibility
+    random.seed(config.dataset_split_seed)
+    random.shuffle(all_samples)
+
+    # Split point
+    split_point = int(len(all_samples) * (1 - config.rlvr_data_fraction))
+
+    if for_rlvr:
+        # RLVR gets the second portion
+        samples = all_samples[split_point:]
+        logger.info(f"RLVR: взято {len(samples)} примеров (после индекса {split_point})")
+    else:
+        # Mid-training gets the first portion
+        samples = all_samples[:split_point]
+        logger.info(f"Mid-Training: взято {len(samples)} примеров (до индекса {split_point})")
+
+    # Limit to max_samples
+    max_samples = max_samples or (config.rlvr_max_samples if for_rlvr else config.mid_training_max_samples)
+    if len(samples) > max_samples:
+        samples = samples[:max_samples]
+        logger.info(f"Ограничено до {max_samples} примеров")
+
+    logger.info(f"Итого загружено: {len(samples)} примеров")
     return samples
 
 
@@ -499,8 +538,8 @@ def run_mid_training(model, tokenizer, config: PipelineConfig, logger):
     logger.info("MID-TRAINING")
     logger.info("=" * 60)
 
-    # Загрузка данных
-    samples = load_dataset_samples(config, logger, config.mid_training_max_samples)
+    # Загрузка данных (mid-training берёт первую часть датасета)
+    samples = load_dataset_samples(config, logger, config.mid_training_max_samples, for_rlvr=False)
 
     dataset = AgenticDataset(samples, tokenizer, config.max_seq_length)
     logger.info(f"Dataset size: {len(dataset)}")
@@ -586,8 +625,8 @@ def run_rlvr_training(model, tokenizer, config: PipelineConfig, logger):
         extract_tool_calls
     )
 
-    # Загрузка данных
-    samples = load_dataset_samples(config, logger, config.rlvr_max_samples)
+    # Загрузка данных (RLVR берёт вторую часть датасета - не пересекается с mid-training)
+    samples = load_dataset_samples(config, logger, config.rlvr_max_samples, for_rlvr=True)
 
     # Подготовка промптов
     rlvr_samples = []
@@ -730,7 +769,8 @@ def start_vllm_server(model_name: str, port: int, logger) -> Optional[int]:
         "--port", str(port),
         "--dtype", "bfloat16",
         "--trust-remote-code",
-        "--max-model-len", "2048",
+        "--max-model-len", "1536",  # Ограничение модели GigaChat3
+        "--gpu-memory-utilization", "0.7",  # Оставить память для training модели
     ]
 
     process = subprocess.Popen(

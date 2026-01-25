@@ -257,12 +257,14 @@ start_vllm_server() {
     log_info "Starting vLLM server for ${MODEL_NAME}..."
 
     # Start in background
+    # max-model-len=1536 - ограничение модели GigaChat3
     nohup python -m vllm.entrypoints.openai.api_server \
         --model "$MODEL_NAME" \
         --port "$VLLM_PORT" \
         --dtype bfloat16 \
         --trust-remote-code \
-        --max-model-len 2048 \
+        --max-model-len 1536 \
+        --gpu-memory-utilization 0.7 \
         > "${WORK_DIR}/vllm_server.log" 2>&1 &
 
     VLLM_PID=$!

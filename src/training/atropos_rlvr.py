@@ -58,6 +58,8 @@ logging.getLogger("openai").setLevel(logging.WARNING)
 MAX_REPLY_TOKENS = 2048
 MAX_GEN_PER_TURN = 512
 MAX_ROLLOUT_TURNS = 3
+MAX_PROMPT_TOKENS = 1024  # Оставляем место для генерации (model max = 1536)
+MAX_MODEL_CONTEXT = 1536  # Ограничение модели GigaChat3
 TOOL_USAGE_BONUS = 0.2
 CORRECT_ANSWER_REWARD = 1.0
 INCORRECT_ANSWER_REWARD = -1.0
@@ -98,6 +100,7 @@ class AtroposConfig:
     temperature: float = 0.7
     top_p: float = 0.9
     max_new_tokens: int = MAX_REPLY_TOKENS
+    max_prompt_tokens: int = MAX_PROMPT_TOKENS  # Truncate prompts to fit context
 
     # Rewards
     correct_reward: float = CORRECT_ANSWER_REWARD
@@ -118,6 +121,12 @@ class AtroposConfig:
     dataset_name: str = "nvidia/Nemotron-Agentic-v1"
     dataset_split: str = "tool_calling"
     max_samples: int = 1000
+    dataset_split_seed: int = 42  # Seed для разделения датасета
+    rlvr_data_fraction: float = 0.5  # Доля данных для RLVR (остальное - mid-training)
+
+    # Memory optimization
+    use_4bit: bool = True  # 4-bit quantization для training модели
+    policy_gradient_micro_batch: int = 4  # Micro-batch для policy gradient
 
     # Logging
     log_every_n_steps: int = 1
@@ -432,11 +441,39 @@ def format_prompt(question: str) -> str:
 class VLLMClient:
     """Клиент для vLLM OpenAI-compatible API"""
 
-    def __init__(self, base_url: str, model_name: str):
+    def __init__(self, base_url: str, model_name: str, max_prompt_tokens: int = MAX_PROMPT_TOKENS):
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
+        self.max_prompt_tokens = max_prompt_tokens
         self._client = None
-        logger.info(f"VLLMClient initialized: {base_url}, model={model_name}")
+        self._tokenizer = None
+        logger.info(f"VLLMClient initialized: {base_url}, model={model_name}, max_prompt={max_prompt_tokens}")
+
+    def truncate_prompt(self, prompt: str) -> str:
+        """Truncate prompt to fit within token limit"""
+        if self._tokenizer is None:
+            try:
+                from transformers import AutoTokenizer
+                self._tokenizer = AutoTokenizer.from_pretrained(
+                    self.model_name,
+                    trust_remote_code=True
+                )
+                logger.info("Tokenizer loaded for prompt truncation")
+            except Exception as e:
+                logger.warning(f"Could not load tokenizer: {e}, using char-based truncation")
+                # Fallback: ~4 chars per token
+                max_chars = self.max_prompt_tokens * 4
+                if len(prompt) > max_chars:
+                    logger.warning(f"Truncating prompt from {len(prompt)} to {max_chars} chars")
+                    return prompt[:max_chars]
+                return prompt
+
+        tokens = self._tokenizer.encode(prompt)
+        if len(tokens) > self.max_prompt_tokens:
+            logger.warning(f"Truncating prompt from {len(tokens)} to {self.max_prompt_tokens} tokens")
+            truncated_tokens = tokens[:self.max_prompt_tokens]
+            return self._tokenizer.decode(truncated_tokens, skip_special_tokens=True)
+        return prompt
 
     @property
     def client(self):
@@ -463,12 +500,14 @@ class VLLMClient:
         stop: Optional[List[str]] = None,
     ) -> List[str]:
         """Генерация ответов через vLLM"""
+        # Truncate prompt to fit context
+        truncated_prompt = self.truncate_prompt(prompt)
         logger.debug(f"Generating {n} responses, max_tokens={max_tokens}")
 
         try:
             response = self.client.completions.create(
                 model=self.model_name,
-                prompt=prompt,
+                prompt=truncated_prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
@@ -563,7 +602,8 @@ class InterleavedThinkingEnv:
         self.config = config
         self.vllm_client = VLLMClient(
             config.vllm_base_url,
-            config.vllm_model_name
+            config.vllm_model_name,
+            max_prompt_tokens=config.max_prompt_tokens
         )
         self.episode_count = 0
         self.total_reward = 0.0
@@ -696,8 +736,8 @@ class AtroposTrainer:
         logger.info("LOADING MODEL")
         logger.info("=" * 60)
 
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        from peft import LoraConfig, get_peft_model, TaskType
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
 
         # Tokenizer
         logger.info(f"Loading tokenizer: {self.config.model_name}")
@@ -708,15 +748,35 @@ class AtroposTrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Model
+        # Model with optional 4-bit quantization
         logger.info(f"Loading model: {self.config.model_name}")
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_name,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-            attn_implementation="sdpa",
-            device_map={"": 0},
-        )
+        logger.info(f"Using 4-bit quantization: {self.config.use_4bit}")
+
+        if self.config.use_4bit:
+            # 4-bit quantization для экономии памяти (~55GB vLLM + ~10GB 4bit model)
+            bnb_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name,
+                quantization_config=bnb_config,
+                trust_remote_code=True,
+                attn_implementation="sdpa",
+                device_map={"": 0},
+            )
+            # Подготовка модели для k-bit training
+            self.model = prepare_model_for_kbit_training(self.model)
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                attn_implementation="sdpa",
+                device_map={"": 0},
+            )
 
         # LoRA
         if self.config.use_lora:
@@ -753,36 +813,65 @@ class AtroposTrainer:
         rollouts: List[Dict],
         advantages: List[float],
     ) -> float:
-        """Perform a policy gradient update"""
+        """
+        Perform a policy gradient update with micro-batching
+
+        Uses gradient accumulation to handle large batches without OOM
+        """
         self.model.train()
 
         total_loss = 0.0
         num_samples = 0
+        micro_batch_size = self.config.policy_gradient_micro_batch
 
-        for rollout, advantage in zip(rollouts, advantages):
-            if advantage == 0:
-                continue
+        # Filter samples with non-zero advantage
+        valid_samples = [(r, a) for r, a in zip(rollouts, advantages) if a != 0]
 
-            # Tokenize
-            full_text = rollout["prompt"] + rollout["response"]
-            inputs = self.tokenizer(
-                full_text,
-                return_tensors="pt",
-                truncation=True,
-                max_length=2048,
-            )
-            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+        if not valid_samples:
+            return 0.0
 
-            # Forward pass
-            outputs = self.model(**inputs, labels=inputs["input_ids"])
+        # Process in micro-batches with gradient accumulation
+        num_micro_batches = (len(valid_samples) + micro_batch_size - 1) // micro_batch_size
+        accumulation_steps = num_micro_batches
 
-            # Policy gradient loss: -advantage * log_prob
-            loss = -advantage * outputs.loss
+        self.optimizer.zero_grad()
 
-            # Backward
-            loss.backward()
-            total_loss += loss.item()
-            num_samples += 1
+        for micro_idx in range(0, len(valid_samples), micro_batch_size):
+            micro_batch = valid_samples[micro_idx:micro_idx + micro_batch_size]
+
+            for rollout, advantage in micro_batch:
+                try:
+                    # Tokenize with shorter max_length to save memory
+                    full_text = rollout["prompt"] + rollout["response"]
+                    inputs = self.tokenizer(
+                        full_text,
+                        return_tensors="pt",
+                        truncation=True,
+                        max_length=1024,  # Reduced for memory
+                    )
+                    inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+
+                    # Forward pass
+                    outputs = self.model(**inputs, labels=inputs["input_ids"])
+
+                    # Policy gradient loss: -advantage * log_prob
+                    # Scale by accumulation steps
+                    loss = (-advantage * outputs.loss) / accumulation_steps
+
+                    # Backward (accumulate gradients)
+                    loss.backward()
+                    total_loss += loss.item() * accumulation_steps
+                    num_samples += 1
+
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        logger.warning(f"OOM in policy gradient, skipping sample")
+                        torch.cuda.empty_cache()
+                        continue
+                    raise
+
+            # Clear cache after each micro-batch
+            torch.cuda.empty_cache()
 
         if num_samples > 0:
             # Gradient clipping and step
@@ -791,17 +880,30 @@ class AtroposTrainer:
                 self.config.max_grad_norm
             )
             self.optimizer.step()
-            self.optimizer.zero_grad()
+
+        self.optimizer.zero_grad()
+        torch.cuda.empty_cache()
 
         avg_loss = total_loss / max(num_samples, 1)
-        logger.debug(f"Policy gradient step: loss={avg_loss:.4f}")
+        logger.debug(f"Policy gradient step: loss={avg_loss:.4f}, samples={num_samples}")
         return avg_loss
 
     def load_dataset(self) -> List[Dict]:
-        """Load and prepare dataset"""
+        """
+        Load and prepare dataset for RLVR.
+
+        Dataset is split to avoid memorization:
+        - First (1 - rlvr_data_fraction) goes to mid-training
+        - Last (rlvr_data_fraction) goes to RLVR
+
+        This ensures RLVR trains on samples not seen during mid-training.
+        """
         logger.info(f"Loading dataset: {self.config.dataset_name}")
+        logger.info(f"RLVR data fraction: {self.config.rlvr_data_fraction}")
+        logger.info(f"Dataset split seed: {self.config.dataset_split_seed}")
 
         from huggingface_hub import hf_hub_download
+        import random
 
         file_path = hf_hub_download(
             repo_id=self.config.dataset_name,
@@ -809,11 +911,10 @@ class AtroposTrainer:
             repo_type="dataset",
         )
 
-        samples = []
+        # Load all samples first
+        all_samples = []
         with open(file_path, 'r', encoding='utf-8') as f:
-            for i, line in enumerate(f):
-                if i >= self.config.max_samples:
-                    break
+            for line in f:
                 try:
                     example = json.loads(line.strip())
                     if "messages" in example:
@@ -827,7 +928,7 @@ class AtroposTrainer:
                                 break
 
                         if question:
-                            samples.append({
+                            all_samples.append({
                                 "question": question,
                                 "prompt": format_prompt(question),
                                 "expected_answer": None,
@@ -835,8 +936,26 @@ class AtroposTrainer:
                 except json.JSONDecodeError:
                     continue
 
-        logger.info(f"Loaded {len(samples)} samples")
-        return samples
+        logger.info(f"Total samples in dataset: {len(all_samples)}")
+
+        # Shuffle with fixed seed for reproducibility
+        random.seed(self.config.dataset_split_seed)
+        random.shuffle(all_samples)
+
+        # Split: first part for mid-training, second part for RLVR
+        split_point = int(len(all_samples) * (1 - self.config.rlvr_data_fraction))
+
+        # Take RLVR portion (second half)
+        rlvr_samples = all_samples[split_point:]
+        logger.info(f"Mid-training samples (not used here): {split_point}")
+        logger.info(f"RLVR samples available: {len(rlvr_samples)}")
+
+        # Limit to max_samples
+        if len(rlvr_samples) > self.config.max_samples:
+            rlvr_samples = rlvr_samples[:self.config.max_samples]
+
+        logger.info(f"Using {len(rlvr_samples)} samples for RLVR training")
+        return rlvr_samples
 
     def truncate_text(self, text: str, start_chars: int = 100, end_chars: int = 80) -> str:
         """Обрезка текста с показом начала и конца"""
