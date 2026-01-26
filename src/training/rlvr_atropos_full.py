@@ -138,6 +138,200 @@ def truncate_text(text: str, max_len: int = 50) -> str:
 
 
 # ============================================================================
+# GRPO/PPO DETAILED LOGGER
+# ============================================================================
+
+class GRPOLogger:
+    """Detailed logging for GRPO/PPO training with group-relative advantages"""
+
+    def __init__(self, verbose: bool = True, log_every_n_groups: int = 5):
+        self.verbose = verbose
+        self.log_every_n_groups = log_every_n_groups
+        self.group_counter = 0
+
+    def log_task(self, prompt: str, expected_answer: str, expected_tools: List[Dict]):
+        """Log task information"""
+        if not self.verbose:
+            return
+
+        print()
+        print_separator("━", 80)
+        print(f"  {Colors.BOLD}{Colors.CYAN}📋 TASK #{self.group_counter + 1}{Colors.END}")
+        print_separator("─", 80)
+
+        # Show prompt (first 200 chars)
+        prompt_preview = prompt.replace('\n', ' ')[:200]
+        print(f"  {Colors.DIM}Prompt:{Colors.END} {truncate_text(prompt_preview, 70)}")
+
+        # Show expected answer
+        if expected_answer:
+            answer_preview = expected_answer.replace('\n', ' ')[:150]
+            print(f"  {Colors.DIM}Expected:{Colors.END} {Colors.GREEN}{truncate_text(answer_preview, 65)}{Colors.END}")
+
+        # Show expected tools
+        if expected_tools:
+            tools_str = ", ".join([t.get("name", "?") for t in expected_tools[:3]])
+            print(f"  {Colors.DIM}Tools:{Colors.END} {Colors.YELLOW}{tools_str}{Colors.END}")
+
+    def log_rollout_group(
+        self,
+        trajectories: List[Dict],
+        group_stats: Dict = None
+    ):
+        """Log a group of rollouts with GRPO-style statistics"""
+        self.group_counter += 1
+
+        if not self.verbose or self.group_counter % self.log_every_n_groups != 0:
+            return
+
+        if not trajectories:
+            return
+
+        rewards = [t.get("reward", 0.0) for t in trajectories]
+        n = len(rewards)
+
+        # Compute group statistics
+        mean_reward = sum(rewards) / n if n > 0 else 0.0
+        std_reward = math.sqrt(sum((r - mean_reward) ** 2 for r in rewards) / n) if n > 1 else 0.0
+        min_reward = min(rewards) if rewards else 0.0
+        max_reward = max(rewards) if rewards else 0.0
+
+        # GRPO: Compute group-relative advantages
+        advantages = [(r - mean_reward) / (std_reward + 1e-8) for r in rewards]
+
+        print()
+        print(f"  {Colors.BOLD}{Colors.MAGENTA}🎲 GROUP ROLLOUTS ({n} samples){Colors.END}")
+        print_separator("─", 80)
+
+        # Show each rollout
+        for i, traj in enumerate(trajectories):
+            response = traj.get("response", "")
+            reward = traj.get("reward", 0.0)
+            info = traj.get("info", {})
+            adv = advantages[i] if i < len(advantages) else 0.0
+
+            # Response preview
+            response_start = response.replace('\n', ' ')[:60]
+            response_end = response.replace('\n', ' ')[-40:] if len(response) > 100 else ""
+
+            # Format reward with color
+            reward_str = Colors.reward(reward)
+
+            # Format advantage with color
+            if adv > 0.5:
+                adv_str = f"{Colors.GREEN}{adv:+.3f}{Colors.END}"
+            elif adv > -0.5:
+                adv_str = f"{Colors.YELLOW}{adv:+.3f}{Colors.END}"
+            else:
+                adv_str = f"{Colors.RED}{adv:+.3f}{Colors.END}"
+
+            # Tool call status
+            tool_status = ""
+            if info.get("has_tool_call"):
+                if info.get("name_match"):
+                    if info.get("args_match"):
+                        tool_status = f"{Colors.GREEN}✓✓{Colors.END}"
+                    else:
+                        tool_status = f"{Colors.YELLOW}✓○{Colors.END}"
+                else:
+                    tool_status = f"{Colors.YELLOW}○○{Colors.END}"
+            else:
+                tool_status = f"{Colors.RED}✗✗{Colors.END}"
+
+            print(f"  {Colors.DIM}[{i+1}]{Colors.END} R={reward_str} A={adv_str} {tool_status}")
+            print(f"      {Colors.DIM}Start:{Colors.END} {truncate_text(response_start, 55)}")
+            if response_end:
+                print(f"      {Colors.DIM}End:{Colors.END}   ...{truncate_text(response_end, 50)}")
+
+        # Group summary
+        print_separator("─", 80)
+        print(f"  {Colors.BOLD}Group Stats:{Colors.END}")
+        print(f"    Reward:    μ={Colors.reward(mean_reward)} σ={format_number(std_reward)} [{Colors.reward(min_reward)}..{Colors.reward(max_reward)}]")
+        print(f"    Advantage: μ={format_number(sum(advantages)/n if n else 0)} range=[{min(advantages):.2f}..{max(advantages):.2f}]")
+
+        if group_stats:
+            if "group_entropy" in group_stats:
+                print(f"    Entropy:   {format_number(group_stats['group_entropy'])}")
+
+    def log_training_step(
+        self,
+        step: int,
+        batch_stats: Dict,
+        entropy_stats: Dict = None,
+        ppo_stats: Dict = None
+    ):
+        """Log detailed training step with entropy and PPO/GRPO metrics"""
+        print()
+        print_separator("═", 80)
+        print(f"  {Colors.BOLD}{Colors.BLUE}📈 TRAINING STEP {step}{Colors.END}")
+        print_separator("─", 80)
+
+        # Batch rewards and advantages
+        print(f"  {Colors.BOLD}Batch Metrics:{Colors.END}")
+        print(f"    Reward Mean:     {Colors.reward(batch_stats.get('reward_mean', 0))}")
+        print(f"    Reward Std:      {format_number(batch_stats.get('reward_std', 0))}")
+        print(f"    Advantage Mean:  {format_number(batch_stats.get('advantage_mean', 0))}")
+        print(f"    Advantage Std:   {format_number(batch_stats.get('advantage_std', 0))}")
+        print(f"    Policy Loss:     {format_number(batch_stats.get('policy_loss', 0))}")
+
+        # Entropy statistics
+        if entropy_stats:
+            print()
+            print(f"  {Colors.BOLD}Entropy Analysis:{Colors.END}")
+            print(f"    Mean Entropy:    {format_number(entropy_stats.get('mean_entropy', 0))}")
+            print(f"    Min Entropy:     {format_number(entropy_stats.get('min_entropy', 0))}")
+            print(f"    Max Entropy:     {format_number(entropy_stats.get('max_entropy', 0))}")
+
+            # Token with highest/lowest entropy
+            if "max_entropy_token" in entropy_stats:
+                max_tok = entropy_stats["max_entropy_token"]
+                print(f"    {Colors.GREEN}↑ Max Token:{Colors.END}    '{max_tok['token']}' (H={max_tok['entropy']:.4f})")
+            if "min_entropy_token" in entropy_stats:
+                min_tok = entropy_stats["min_entropy_token"]
+                print(f"    {Colors.RED}↓ Min Token:{Colors.END}    '{min_tok['token']}' (H={min_tok['entropy']:.4f})")
+
+            # Per-rollout entropy
+            if "rollout_entropies" in entropy_stats:
+                entropies = entropy_stats["rollout_entropies"]
+                ent_str = " ".join([f"{e:.3f}" for e in entropies[:8]])
+                print(f"    Per-Rollout:     [{ent_str}{'...' if len(entropies) > 8 else ''}]")
+
+        # PPO/GRPO specific metrics
+        if ppo_stats:
+            print()
+            print(f"  {Colors.BOLD}PPO/GRPO Metrics:{Colors.END}")
+            if "epsilon" in ppo_stats:
+                print(f"    ε (clip):        {ppo_stats['epsilon']:.3f}")
+            if "kl_divergence" in ppo_stats:
+                kl = ppo_stats["kl_divergence"]
+                kl_color = Colors.GREEN if kl < 0.01 else Colors.YELLOW if kl < 0.05 else Colors.RED
+                print(f"    KL Divergence:   {kl_color}{kl:.6f}{Colors.END}")
+            if "clip_fraction" in ppo_stats:
+                cf = ppo_stats["clip_fraction"]
+                cf_color = Colors.GREEN if cf < 0.1 else Colors.YELLOW if cf < 0.3 else Colors.RED
+                print(f"    Clip Fraction:   {cf_color}{cf*100:.1f}%{Colors.END}")
+            if "approx_kl" in ppo_stats:
+                print(f"    Approx KL:       {format_number(ppo_stats['approx_kl'])}")
+            if "ratio_mean" in ppo_stats:
+                print(f"    Ratio μ:         {format_number(ppo_stats['ratio_mean'])}")
+            if "ratio_std" in ppo_stats:
+                print(f"    Ratio σ:         {format_number(ppo_stats['ratio_std'])}")
+
+            # Group-relative stats (GRPO)
+            if "group_advantages" in ppo_stats:
+                ga = ppo_stats["group_advantages"]
+                print(f"    Group Adv μ:     {format_number(ga.get('mean', 0))}")
+                print(f"    Group Adv σ:     {format_number(ga.get('std', 0))}")
+                print(f"    Positive %:      {ga.get('positive_pct', 0)*100:.1f}%")
+
+        print_separator("═", 80)
+
+
+# Global logger instance
+GRPO_LOGGER = GRPOLogger(verbose=True, log_every_n_groups=5)
+
+
+# ============================================================================
 # RLVR METRICS TRACKER
 # ============================================================================
 
@@ -873,7 +1067,10 @@ Think step by step before making tool calls."""
             # Format prompt and extract expected answer
             prompt, expected_tools, expected_answer = self._format_prompt(sample)
 
-            # Generate multiple rollouts per prompt
+            # Log task information
+            GRPO_LOGGER.log_task(prompt, expected_answer, expected_tools)
+
+            # Generate multiple rollouts per prompt (GRPO-style grouping)
             trajectories = []
             for _ in range(self.group_size):
                 response = self.generate_rollout(prompt)
@@ -897,6 +1094,10 @@ Think step by step before making tool calls."""
                 }
                 trajectories.append(trajectory)
                 self.stats["rollouts_generated"] += 1
+
+            # Log group rollouts with GRPO statistics
+            if trajectories:
+                GRPO_LOGGER.log_rollout_group(trajectories)
 
             # Push to API
             if trajectories:
@@ -948,6 +1149,14 @@ class RLVRConfig:
     reward_scale: float = 1.0
     baseline_momentum: float = 0.99
 
+    # PPO/GRPO specific
+    ppo_epsilon: float = 0.2  # PPO clipping parameter
+    use_ppo_clipping: bool = True  # Enable PPO-style clipping
+    kl_coef: float = 0.1  # KL penalty coefficient
+    target_kl: float = 0.01  # Target KL divergence for early stopping
+    use_grpo_advantages: bool = True  # Use group-relative advantages (GRPO)
+    normalize_advantages: bool = True  # Normalize advantages per batch
+
     # LoRA (reduced for memory)
     use_lora: bool = True
     lora_r: int = 32  # Reduced from 64
@@ -957,6 +1166,8 @@ class RLVRConfig:
     log_steps: int = 10
     save_steps: int = 100
     example_interval: int = 50
+    verbose_logging: bool = True  # Enable detailed GRPO/PPO logging
+    log_every_n_groups: int = 5  # Log every N rollout groups
 
     # Sequence
     max_seq_length: int = 1536
@@ -981,6 +1192,13 @@ class FullRLVRTrainer:
 
         # Running baseline
         self.running_baseline = 0.0
+
+        # Step counter for logging
+        self.step_counter = 0
+
+        # Configure logger
+        GRPO_LOGGER.verbose = config.verbose_logging
+        GRPO_LOGGER.log_every_n_groups = config.log_every_n_groups
 
         # Setup
         self._setup_model()
@@ -1041,13 +1259,44 @@ class FullRLVRTrainer:
             lr=self.config.learning_rate,
         )
 
-    def compute_policy_loss(
+    def compute_policy_loss_detailed(
         self,
         prompt: str,
         response: str,
         reward: float,
-    ) -> Tuple[torch.Tensor, float, float]:
-        """Compute policy gradient loss"""
+        advantage: float = None,
+        old_log_prob: float = None,
+    ) -> Dict[str, Any]:
+        """
+        Compute policy gradient loss with detailed metrics for GRPO/PPO logging.
+
+        Returns dict with:
+        - loss: total loss tensor
+        - entropy: mean entropy
+        - advantage: computed advantage
+        - token_entropies: per-token entropy list
+        - min_entropy_token: token with lowest entropy
+        - max_entropy_token: token with highest entropy
+        - log_prob: response log probability
+        - ratio: PPO probability ratio (if old_log_prob provided)
+        - kl_divergence: approximate KL
+        - clipped: whether ratio was clipped
+        """
+        result = {
+            "loss": torch.tensor(0.0, device=self.device, requires_grad=True),
+            "entropy": 0.0,
+            "advantage": 0.0,
+            "token_entropies": [],
+            "min_entropy_token": None,
+            "max_entropy_token": None,
+            "log_prob": 0.0,
+            "ratio": 1.0,
+            "kl_divergence": 0.0,
+            "clipped": False,
+            "clip_fraction": 0.0,
+            "tokens": [],
+        }
+
         full_text = prompt + response
         try:
             encoded = self.tokenizer(
@@ -1057,77 +1306,220 @@ class FullRLVRTrainer:
                 max_length=self.config.max_seq_length,
             ).to(self.device)
         except:
-            return torch.tensor(0.0, device=self.device), 0.0, 0.0
+            return result
 
         prompt_encoded = self.tokenizer(prompt, return_tensors="pt")
         prompt_len = prompt_encoded["input_ids"].shape[1]
         response_len = encoded["input_ids"].shape[1] - prompt_len
 
         if response_len <= 0:
-            return torch.tensor(0.0, device=self.device), 0.0, 0.0
+            return result
 
         try:
-            # Forward pass without autocast (MoE models have dtype issues)
+            # Forward pass
             outputs = self.model(
                 input_ids=encoded["input_ids"],
                 attention_mask=encoded["attention_mask"],
             )
 
-            logits = outputs.logits[:, prompt_len - 1:-1, :].float()  # Cast to float32
+            logits = outputs.logits[:, prompt_len - 1:-1, :].float()
             target_ids = encoded["input_ids"][:, prompt_len:]
 
             log_probs = F.log_softmax(logits, dim=-1)
             token_log_probs = log_probs.gather(2, target_ids.unsqueeze(-1)).squeeze(-1)
             response_log_prob = token_log_probs.sum()
 
-            # Entropy
+            # Detailed entropy per token
             probs = F.softmax(logits, dim=-1)
-            entropy = -(probs * log_probs).sum(dim=-1).mean()
+            token_entropies_tensor = -(probs * log_probs).sum(dim=-1).squeeze(0)  # [seq_len]
+            token_entropies = token_entropies_tensor.detach().cpu().tolist()
+            mean_entropy = token_entropies_tensor.mean()
 
-            # Advantage
-            advantage = (reward - self.running_baseline) * self.config.reward_scale
+            # Get tokens for logging
+            response_tokens = target_ids.squeeze(0).tolist()
+            decoded_tokens = [self.tokenizer.decode([t]) for t in response_tokens[:len(token_entropies)]]
 
-            # Policy loss
-            policy_loss = -advantage * response_log_prob
-            entropy_loss = -self.config.entropy_coef * entropy
+            # Find min/max entropy tokens
+            if token_entropies and decoded_tokens:
+                min_idx = token_entropies.index(min(token_entropies))
+                max_idx = token_entropies.index(max(token_entropies))
+                result["min_entropy_token"] = {
+                    "token": decoded_tokens[min_idx] if min_idx < len(decoded_tokens) else "?",
+                    "entropy": token_entropies[min_idx],
+                    "position": min_idx
+                }
+                result["max_entropy_token"] = {
+                    "token": decoded_tokens[max_idx] if max_idx < len(decoded_tokens) else "?",
+                    "entropy": token_entropies[max_idx],
+                    "position": max_idx
+                }
 
-            total_loss = policy_loss + entropy_loss
+            result["token_entropies"] = token_entropies[:20]  # First 20 tokens
+            result["tokens"] = decoded_tokens[:20]
+            result["entropy"] = mean_entropy.item()
+            result["log_prob"] = response_log_prob.item()
+
+            # Compute advantage if not provided (GRPO computes group-relative)
+            if advantage is None:
+                advantage = (reward - self.running_baseline) * self.config.reward_scale
+            result["advantage"] = advantage
+
+            # PPO-style ratio and clipping
+            if old_log_prob is not None and self.config.use_ppo_clipping:
+                log_ratio = response_log_prob - old_log_prob
+                ratio = torch.exp(log_ratio)
+                result["ratio"] = ratio.item()
+
+                # Approximate KL divergence
+                approx_kl = ((ratio - 1) - log_ratio).mean()
+                result["kl_divergence"] = approx_kl.item() if isinstance(approx_kl, torch.Tensor) else approx_kl
+
+                # Clipped objective
+                eps = self.config.ppo_epsilon
+                clipped_ratio = torch.clamp(ratio, 1 - eps, 1 + eps)
+                result["clipped"] = (ratio < 1 - eps).any().item() or (ratio > 1 + eps).any().item()
+
+                # Policy loss with clipping
+                surr1 = ratio * advantage
+                surr2 = clipped_ratio * advantage
+                policy_loss = -torch.min(surr1, surr2)
+
+                # Clip fraction
+                clip_fraction = ((ratio - 1).abs() > eps).float().mean()
+                result["clip_fraction"] = clip_fraction.item()
+            else:
+                # Standard REINFORCE
+                policy_loss = -advantage * response_log_prob
+
+            # Entropy bonus
+            entropy_loss = -self.config.entropy_coef * mean_entropy
+
+            # KL penalty (optional)
+            kl_loss = torch.tensor(0.0, device=self.device)
+            if self.config.kl_coef > 0 and old_log_prob is not None:
+                kl_loss = self.config.kl_coef * result["kl_divergence"]
+
+            total_loss = policy_loss + entropy_loss + kl_loss
+            result["loss"] = total_loss
+
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 torch.cuda.empty_cache()
-            return torch.tensor(0.0, device=self.device, requires_grad=True), 0.0, 0.0
+            return result
 
-        return total_loss, entropy.item(), advantage
+        return result
 
-    def train_on_batch(self, batch: List[Dict]) -> Dict[str, float]:
-        """Train on a batch of trajectories"""
+    def compute_policy_loss(
+        self,
+        prompt: str,
+        response: str,
+        reward: float,
+    ) -> Tuple[torch.Tensor, float, float]:
+        """Compute policy gradient loss (backward compatible)"""
+        result = self.compute_policy_loss_detailed(prompt, response, reward)
+        return result["loss"], result["entropy"], result["advantage"]
+
+    def train_on_batch(self, batch: List[Dict]) -> Dict[str, Any]:
+        """
+        Train on a batch of trajectories with GRPO/PPO detailed logging.
+
+        Implements:
+        - GRPO: Group-relative advantage normalization
+        - PPO: Probability ratio clipping
+        - Detailed entropy and advantage logging
+        """
         total_loss = torch.tensor(0.0, device=self.device)
         batch_rewards = []
+        batch_advantages = []
+        batch_entropies = []
+        rollout_entropies = []
+        all_token_entropies = []
+        min_entropy_tokens = []
+        max_entropy_tokens = []
+        ppo_ratios = []
+        ppo_clip_fractions = []
+        kl_divergences = []
         num_valid = 0
 
+        # GRPO: First pass to compute group mean/std for advantages
+        rewards = [t.get("reward", 0.0) for t in batch if t.get("prompt") and t.get("response")]
+        if not rewards:
+            return {"loss": 0.0, "reward": 0.0, "num_valid": 0}
+
+        reward_mean = sum(rewards) / len(rewards)
+        reward_std = math.sqrt(sum((r - reward_mean) ** 2 for r in rewards) / len(rewards)) if len(rewards) > 1 else 1.0
+
+        # Compute GRPO group-relative advantages
+        grpo_advantages = []
         for traj in batch:
+            reward = traj.get("reward", 0.0)
+            if self.config.use_grpo_advantages:
+                # GRPO: advantage = (reward - group_mean) / group_std
+                adv = (reward - reward_mean) / (reward_std + 1e-8)
+            else:
+                # Standard: advantage = reward - baseline
+                adv = (reward - self.running_baseline) * self.config.reward_scale
+            grpo_advantages.append(adv)
+
+        # Normalize advantages if configured
+        if self.config.normalize_advantages and grpo_advantages:
+            adv_mean = sum(grpo_advantages) / len(grpo_advantages)
+            adv_std = math.sqrt(sum((a - adv_mean) ** 2 for a in grpo_advantages) / len(grpo_advantages)) if len(grpo_advantages) > 1 else 1.0
+            grpo_advantages = [(a - adv_mean) / (adv_std + 1e-8) for a in grpo_advantages]
+
+        # Second pass: compute losses with GRPO advantages
+        for i, traj in enumerate(batch):
             prompt = traj.get("prompt", "")
             response = traj.get("response", "")
             reward = traj.get("reward", 0.0)
             info = traj.get("info", {})
+            old_log_prob = traj.get("log_prob", None)  # For PPO
 
             if not prompt or not response:
                 continue
 
-            loss, entropy, advantage = self.compute_policy_loss(prompt, response, reward)
+            # Use GRPO advantage
+            advantage = grpo_advantages[i] if i < len(grpo_advantages) else 0.0
 
+            # Compute detailed loss
+            result = self.compute_policy_loss_detailed(
+                prompt, response, reward,
+                advantage=advantage,
+                old_log_prob=old_log_prob
+            )
+
+            loss = result["loss"]
             if loss.requires_grad:
                 total_loss = total_loss + loss
                 num_valid += 1
 
             batch_rewards.append(reward)
+            batch_advantages.append(advantage)
+            batch_entropies.append(result["entropy"])
+            rollout_entropies.append(result["entropy"])
+
+            # Collect entropy tokens
+            if result["token_entropies"]:
+                all_token_entropies.extend(result["token_entropies"])
+            if result["min_entropy_token"]:
+                min_entropy_tokens.append(result["min_entropy_token"])
+            if result["max_entropy_token"]:
+                max_entropy_tokens.append(result["max_entropy_token"])
+
+            # PPO metrics
+            if result["ratio"] != 1.0:
+                ppo_ratios.append(result["ratio"])
+            if result["clip_fraction"] > 0:
+                ppo_clip_fractions.append(result["clip_fraction"])
+            if result["kl_divergence"] != 0:
+                kl_divergences.append(result["kl_divergence"])
 
             # Update metrics
             self.metrics.update(
                 reward=reward,
                 advantage=advantage,
                 policy_loss=loss.item() if isinstance(loss, torch.Tensor) else loss,
-                entropy=entropy,
+                entropy=result["entropy"],
                 tool_calls=info.get("num_tool_calls", 0),
                 correct_tools=info.get("num_correct", 0),
                 solved=reward > 0.5,
@@ -1148,10 +1540,61 @@ class FullRLVRTrainer:
                 (1 - self.config.baseline_momentum) * batch_mean
             )
 
+        # Compile detailed statistics
+        batch_stats = {
+            "reward_mean": sum(batch_rewards) / len(batch_rewards) if batch_rewards else 0.0,
+            "reward_std": reward_std,
+            "advantage_mean": sum(batch_advantages) / len(batch_advantages) if batch_advantages else 0.0,
+            "advantage_std": math.sqrt(sum((a - sum(batch_advantages)/len(batch_advantages))**2 for a in batch_advantages) / len(batch_advantages)) if len(batch_advantages) > 1 else 0.0,
+            "policy_loss": total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss,
+        }
+
+        # Entropy statistics
+        entropy_stats = {
+            "mean_entropy": sum(batch_entropies) / len(batch_entropies) if batch_entropies else 0.0,
+            "min_entropy": min(all_token_entropies) if all_token_entropies else 0.0,
+            "max_entropy": max(all_token_entropies) if all_token_entropies else 0.0,
+            "rollout_entropies": rollout_entropies[:8],  # First 8 rollouts
+        }
+
+        # Find overall min/max entropy tokens
+        if min_entropy_tokens:
+            best_min = min(min_entropy_tokens, key=lambda x: x["entropy"])
+            entropy_stats["min_entropy_token"] = best_min
+        if max_entropy_tokens:
+            best_max = max(max_entropy_tokens, key=lambda x: x["entropy"])
+            entropy_stats["max_entropy_token"] = best_max
+
+        # PPO/GRPO statistics
+        ppo_stats = {
+            "epsilon": self.config.ppo_epsilon,
+            "kl_divergence": sum(kl_divergences) / len(kl_divergences) if kl_divergences else 0.0,
+            "clip_fraction": sum(ppo_clip_fractions) / len(ppo_clip_fractions) if ppo_clip_fractions else 0.0,
+            "ratio_mean": sum(ppo_ratios) / len(ppo_ratios) if ppo_ratios else 1.0,
+            "ratio_std": math.sqrt(sum((r - sum(ppo_ratios)/len(ppo_ratios))**2 for r in ppo_ratios) / len(ppo_ratios)) if len(ppo_ratios) > 1 else 0.0,
+            "group_advantages": {
+                "mean": sum(grpo_advantages) / len(grpo_advantages) if grpo_advantages else 0.0,
+                "std": math.sqrt(sum((a - sum(grpo_advantages)/len(grpo_advantages))**2 for a in grpo_advantages) / len(grpo_advantages)) if len(grpo_advantages) > 1 else 0.0,
+                "positive_pct": sum(1 for a in grpo_advantages if a > 0) / len(grpo_advantages) if grpo_advantages else 0.0,
+            }
+        }
+
+        # Log detailed training step
+        if self.config.verbose_logging and self.step_counter % self.config.log_steps == 0:
+            GRPO_LOGGER.log_training_step(
+                self.step_counter,
+                batch_stats,
+                entropy_stats,
+                ppo_stats
+            )
+
         return {
             "loss": total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss,
-            "reward": sum(batch_rewards) / len(batch_rewards) if batch_rewards else 0.0,
+            "reward": batch_stats["reward_mean"],
             "num_valid": num_valid,
+            "batch_stats": batch_stats,
+            "entropy_stats": entropy_stats,
+            "ppo_stats": ppo_stats,
         }
 
     def log_detailed_metrics(self, step: int, eta: float):
@@ -1275,6 +1718,9 @@ class FullRLVRTrainer:
         )
 
         for step in progress:
+            # Update step counter for logging
+            self.step_counter = step + 1
+
             # Wait for batch (smaller batch for memory)
             batch = []
             wait_start = time.time()
@@ -1388,6 +1834,20 @@ def main():
     # Logging
     parser.add_argument("--log-steps", type=int, default=10)
     parser.add_argument("--save-steps", type=int, default=100)
+    parser.add_argument("--verbose", action="store_true", default=True,
+                        help="Enable detailed GRPO/PPO logging")
+    parser.add_argument("--log-every-n-groups", type=int, default=5,
+                        help="Log every N rollout groups")
+
+    # PPO/GRPO
+    parser.add_argument("--ppo-epsilon", type=float, default=0.2,
+                        help="PPO clipping parameter")
+    parser.add_argument("--use-ppo-clipping", action="store_true", default=True,
+                        help="Enable PPO-style clipping")
+    parser.add_argument("--use-grpo-advantages", action="store_true", default=True,
+                        help="Use group-relative advantages (GRPO)")
+    parser.add_argument("--kl-coef", type=float, default=0.1,
+                        help="KL penalty coefficient")
 
     # Mode
     parser.add_argument("--trainer-only", action="store_true",
@@ -1413,10 +1873,17 @@ def main():
         steps_per_rollout=args.steps_per_rollout,
         max_queue_size=args.max_queue_size,
         max_new_tokens=args.max_new_tokens,
+        # PPO/GRPO settings
+        ppo_epsilon=args.ppo_epsilon,
+        use_ppo_clipping=args.use_ppo_clipping,
+        use_grpo_advantages=args.use_grpo_advantages,
+        kl_coef=args.kl_coef,
+        verbose_logging=args.verbose,
+        log_every_n_groups=args.log_every_n_groups,
     )
 
     print_box(
-        "ATROPOS RLVR PIPELINE",
+        "ATROPOS RLVR PIPELINE (GRPO/PPO)",
         [
             f"Model: {args.model}",
             f"Dataset: {args.dataset}",
@@ -1426,6 +1893,13 @@ def main():
             f"  • vLLM Server: {args.vllm_url}",
             f"  • Environment: rollout generator",
             f"  • Trainer: policy gradient",
+            "",
+            f"GRPO/PPO Settings:",
+            f"  • Group size: {args.group_size} (GRPO)",
+            f"  • PPO ε: {args.ppo_epsilon}",
+            f"  • GRPO advantages: {args.use_grpo_advantages}",
+            f"  • KL coef: {args.kl_coef}",
+            f"  • Verbose: {args.verbose}",
         ],
         width=70,
         color=Colors.HEADER
