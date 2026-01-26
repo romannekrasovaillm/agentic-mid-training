@@ -463,14 +463,20 @@ class RewardComputer:
         return tool_calls
 
     @classmethod
-    def compute_reward(cls, response: str, expected_tools: List[Dict] = None) -> Tuple[float, Dict]:
+    def compute_reward(
+        cls,
+        response: str,
+        expected_tools: List[Dict] = None,
+        expected_answer: str = None
+    ) -> Tuple[float, Dict]:
         """
         Compute reward for a response.
 
         Reward components:
-        - Tool call format: +0.3 if valid JSON tool call
+        - Tool call format: +0.2 if valid JSON tool call
         - Tool name match: +0.3 if matches expected
-        - Arguments match: +0.4 if arguments correct
+        - Arguments match: +0.3 if arguments correct
+        - Content similarity: +0.2 if response similar to expected
         - Penalty for no tool call when expected: -0.5
         """
         info = {
@@ -478,6 +484,7 @@ class RewardComputer:
             "valid_json": False,
             "name_match": False,
             "args_match": False,
+            "content_match": False,
             "tool_calls": [],
             "num_tool_calls": 0,
             "num_correct": 0,
@@ -488,37 +495,62 @@ class RewardComputer:
         info["has_tool_call"] = len(actual_tools) > 0
         info["num_tool_calls"] = len(actual_tools)
 
-        if not actual_tools:
+        reward = 0.0
+
+        # Check tool calls
+        if actual_tools:
+            info["valid_json"] = True
+            reward += 0.2  # Valid tool call format
+
             if expected_tools:
-                return -0.5, info
-            return 0.0, info
+                expected_names = {t.get("name", "") for t in expected_tools}
+                actual_names = {t.get("name", "") for t in actual_tools}
 
-        info["valid_json"] = True
-        reward = 0.3
+                matches = expected_names & actual_names
+                if matches:
+                    info["name_match"] = True
+                    info["num_correct"] = len(matches)
+                    reward += 0.3  # Tool name match
 
-        if expected_tools:
-            expected_names = {t.get("name", "") for t in expected_tools}
-            actual_names = {t.get("name", "") for t in actual_tools}
-
-            matches = expected_names & actual_names
-            if matches:
-                info["name_match"] = True
-                info["num_correct"] = len(matches)
-                reward += 0.3
-
-                for exp in expected_tools:
-                    for act in actual_tools:
-                        if exp.get("name") == act.get("name"):
-                            exp_args = exp.get("arguments", {})
-                            act_args = act.get("arguments", {})
-                            if exp_args == act_args:
-                                info["args_match"] = True
-                                reward += 0.4
-                                break
+                    # Check arguments
+                    for exp in expected_tools:
+                        for act in actual_tools:
+                            if exp.get("name") == act.get("name"):
+                                exp_args = exp.get("arguments", {})
+                                act_args = act.get("arguments", {})
+                                if exp_args == act_args:
+                                    info["args_match"] = True
+                                    reward += 0.3  # Arguments match
+                                    break
+                        if info["args_match"]:
+                            break
+            else:
+                reward += 0.1  # Tool call without expected (exploratory)
         else:
-            reward += 0.2
+            # No tool call in response
+            if expected_tools:
+                reward = -0.5  # Penalty for missing tool call
+            else:
+                reward = 0.0
 
-        return min(reward, 1.0), info
+        # Check content similarity with expected answer
+        if expected_answer and len(expected_answer) > 10:
+            # Simple similarity: check if key phrases match
+            response_lower = response.lower()
+            expected_lower = expected_answer.lower()
+
+            # Extract key words from expected answer
+            expected_words = set(expected_lower.split())
+            response_words = set(response_lower.split())
+
+            # Calculate overlap
+            if expected_words:
+                overlap = len(expected_words & response_words) / len(expected_words)
+                if overlap > 0.5:
+                    info["content_match"] = True
+                    reward += 0.2 * overlap  # Up to +0.2 for content match
+
+        return min(max(reward, -1.0), 1.0), info
 
 
 # ============================================================================
@@ -537,7 +569,7 @@ class RolloutEnvironment:
         dataset_name: str,
         model_name: str,
         max_samples: int = 5000,
-        group_size: int = 2,  # Reduced for memory
+        group_size: int = 4,  # Number of rollouts per prompt
         max_new_tokens: int = 384,  # Reduced for memory
         temperature: float = 0.7,
         max_queue_size: int = 64,  # Throttling: pause when queue exceeds this
@@ -708,14 +740,15 @@ class RolloutEnvironment:
 
         return samples
 
-    def _format_prompt(self, sample: Dict) -> Tuple[str, List[Dict]]:
-        """Format sample into prompt and extract expected tools"""
+    def _format_prompt(self, sample: Dict) -> Tuple[str, List[Dict], str]:
+        """Format sample into prompt, extract expected tools, and expected answer"""
         messages = sample.get("messages", [])
         if isinstance(messages, str):
             messages = json.loads(messages)
 
         prompt_parts = []
         expected_tools = []
+        expected_answer = ""
 
         system_prompt = """You are a helpful AI assistant with access to tools. When you need to use a tool, respond with:
 
@@ -727,19 +760,52 @@ Think step by step before making tool calls."""
 
         prompt_parts.append(f"System: {system_prompt}\n")
 
-        for msg in messages:
+        # Process messages and extract expected answer from assistant
+        for i, msg in enumerate(messages):
             role = msg.get("role", "")
             content = msg.get("content", "")
 
-            if role == "user":
+            # Handle content that might be dict or list
+            if isinstance(content, dict):
+                content = json.dumps(content)
+            elif isinstance(content, list):
+                content = " ".join(str(c) for c in content)
+
+            if role == "system":
+                # Use the actual system prompt if provided
+                prompt_parts = [f"System: {content}\n"]
+            elif role == "user":
                 prompt_parts.append(f"User: {content}\n")
             elif role == "assistant":
+                # Extract expected answer from the last assistant message
+                expected_answer = content
+
+                # Extract tool calls from assistant's response
                 tools = RewardComputer.extract_tool_calls(content)
                 expected_tools.extend(tools)
-                break
+
+                # Also check for tool_calls field in the message
+                if "tool_calls" in msg:
+                    tool_calls = msg.get("tool_calls", [])
+                    if isinstance(tool_calls, list):
+                        for tc in tool_calls:
+                            if isinstance(tc, dict):
+                                tool_info = {
+                                    "name": tc.get("function", {}).get("name", tc.get("name", "")),
+                                    "arguments": tc.get("function", {}).get("arguments", tc.get("arguments", {}))
+                                }
+                                # Parse arguments if string
+                                if isinstance(tool_info["arguments"], str):
+                                    try:
+                                        tool_info["arguments"] = json.loads(tool_info["arguments"])
+                                    except:
+                                        pass
+                                if tool_info["name"]:
+                                    expected_tools.append(tool_info)
+                break  # Only use first assistant response as target
 
         prompt_parts.append("Assistant: ")
-        return "".join(prompt_parts), expected_tools
+        return "".join(prompt_parts), expected_tools, expected_answer
 
     def generate_rollout(self, prompt: str) -> str:
         """Generate a single rollout using vLLM"""
@@ -804,8 +870,8 @@ Think step by step before making tool calls."""
             sample = self.samples[sample_idx]
             sample_idx += 1
 
-            # Format prompt
-            prompt, expected_tools = self._format_prompt(sample)
+            # Format prompt and extract expected answer
+            prompt, expected_tools, expected_answer = self._format_prompt(sample)
 
             # Generate multiple rollouts per prompt
             trajectories = []
@@ -814,14 +880,19 @@ Think step by step before making tool calls."""
                 if not response:
                     continue
 
-                # Compute reward
-                reward, info = RewardComputer.compute_reward(response, expected_tools)
+                # Compute reward with expected answer
+                reward, info = RewardComputer.compute_reward(
+                    response,
+                    expected_tools,
+                    expected_answer=expected_answer
+                )
 
                 trajectory = {
                     "prompt": prompt,
                     "response": response,
                     "reward": reward,
                     "expected_tool_calls": expected_tools,
+                    "expected_answer": expected_answer,
                     "info": info,
                 }
                 trajectories.append(trajectory)
@@ -866,7 +937,7 @@ class RLVRConfig:
     steps_per_rollout: int = 2  # Multiple gradient steps per batch (reuse rollouts)
 
     # Generation (throttling)
-    group_size: int = 2  # Reduced from 4 - fewer samples per prompt
+    group_size: int = 4  # Number of rollouts per prompt for GRPO-style training
     max_new_tokens: int = 384  # Reduced from 512
     temperature: float = 0.7
     max_queue_size: int = 64  # Pause generation when queue exceeds this
@@ -1308,7 +1379,7 @@ def main():
                         help="Gradient steps per batch (reuse rollouts)")
 
     # Generation (with throttling)
-    parser.add_argument("--group-size", type=int, default=2, help="Rollouts per prompt (reduced)")
+    parser.add_argument("--group-size", type=int, default=4, help="Rollouts per prompt for GRPO-style training")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-queue-size", type=int, default=64,
                         help="Pause generation when queue exceeds this")
