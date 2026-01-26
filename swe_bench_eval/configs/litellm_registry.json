@@ -1,0 +1,26 @@
+[
+    {
+        "model_name": "lora-model",
+        "litellm_params": {
+            "model": "openai/default",
+            "api_base": "http://localhost:8080/v1",
+            "api_key": "not-needed"
+        }
+    },
+    {
+        "model_name": "lora-model-baseline",
+        "litellm_params": {
+            "model": "openai/baseline",
+            "api_base": "http://localhost:8080/v1",
+            "api_key": "not-needed"
+        }
+    },
+    {
+        "model_name": "lora-model-trained",
+        "litellm_params": {
+            "model": "openai/trained",
+            "api_base": "http://localhost:8080/v1",
+            "api_key": "not-needed"
+        }
+    }
+]

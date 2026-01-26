@@ -1,0 +1,35 @@
+# SWE-bench Evaluation Requirements
+# Python 3.10+
+
+# Core dependencies
+torch>=2.1.0
+transformers>=4.45.0
+peft>=0.12.0
+accelerate>=0.34.0
+
+# Model serving
+vllm>=0.6.0
+flask>=3.0.0
+
+# Quantization support
+bitsandbytes>=0.44.0
+
+# mini-swe-agent
+mini-swe-agent>=0.1.0
+# Or install from git:
+# pip install git+https://github.com/SWE-agent/mini-swe-agent.git
+
+# LiteLLM for model abstraction
+litellm>=1.50.0
+openai>=1.0.0
+
+# SWE-bench evaluation
+swe-bench @ git+https://github.com/princeton-nlp/SWE-bench.git
+
+# Utilities
+pyyaml>=6.0
+tqdm>=4.66.0
+requests>=2.31.0
+
+# For Docker sandbox
+docker>=7.0.0

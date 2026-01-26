@@ -1,0 +1,119 @@
+# SWE-Verified Benchmark Configuration for LoRA-adapted Models
+# Compatible with mini-swe-agent from Princeton
+
+# =============================================================================
+# Model Configuration
+# =============================================================================
+model:
+  # Base model (HuggingFace repo or local path)
+  base_model: "ai-sage/GigaChat3-10B-A1.8B-bf16"
+
+  # LoRA adapter path (required)
+  lora_path: "./checkpoints/swe-agent-lora"
+
+  # Model serving mode: "vllm" (recommended for speed) or "transformers"
+  serving_mode: "vllm"
+
+  # Model name for API calls (used with LiteLLM)
+  # Format: openai/<model-name> for local OpenAI-compatible server
+  litellm_model: "openai/default"
+
+  # Server settings
+  server:
+    host: "localhost"
+    port: 8080
+    gpu_memory_utilization: 0.9
+    max_model_len: 8192
+    tensor_parallel_size: 1
+
+  # Quantization (optional, for smaller GPUs)
+  quantization:
+    enabled: false
+    # Options: "4bit", "8bit"
+    mode: "4bit"
+
+# =============================================================================
+# Benchmark Configuration
+# =============================================================================
+benchmark:
+  # Dataset: "princeton-nlp/SWE-bench_Verified"
+  dataset: "princeton-nlp/SWE-bench_Verified"
+
+  # Optional: specific split (default uses full verified set)
+  split: null
+
+  # Optional: limit number of instances for testing
+  # Set to null for full benchmark
+  max_instances: null
+
+  # Optional: specific instance IDs to run
+  instance_ids: null
+
+# =============================================================================
+# Agent Configuration
+# =============================================================================
+agent:
+  # Maximum turns (actions) per instance
+  max_turns: 30
+
+  # Temperature for generation
+  temperature: 0.0
+
+  # Maximum tokens per response
+  max_tokens: 4096
+
+  # Sandbox environment: "docker", "podman", "singularity", "apptainer"
+  sandbox: "docker"
+
+  # Cost tracking mode: "enabled", "disabled", "ignore_errors"
+  cost_tracking: "ignore_errors"
+
+# =============================================================================
+# Output Configuration
+# =============================================================================
+output:
+  # Base directory for results
+  dir: "./outputs/swe-verified"
+
+  # Subdirectories created automatically:
+  # - trajectories/   - Agent action trajectories
+  # - predictions/    - Model predictions (patches)
+  # - logs/           - Detailed logs
+  # - results/        - Evaluation metrics
+
+  # Save trajectories for analysis
+  save_trajectories: true
+
+  # Save detailed logs
+  save_logs: true
+
+# =============================================================================
+# Evaluation Configuration
+# =============================================================================
+evaluation:
+  # Run SWE-bench evaluation after predictions
+  auto_evaluate: true
+
+  # Parallel workers for evaluation
+  num_workers: 4
+
+  # Timeout per instance (seconds)
+  timeout: 1800
+
+# =============================================================================
+# Comparison Configuration (optional)
+# =============================================================================
+comparison:
+  # Enable baseline comparison
+  enabled: false
+
+  # Baseline model (without LoRA or different adapter)
+  baseline:
+    # Option 1: Same base model, no LoRA
+    use_base_only: false
+
+    # Option 2: Different LoRA adapter
+    lora_path: null
+
+    # Option 3: External API model
+    litellm_model: null
