@@ -149,7 +149,7 @@ class GRPOLogger:
         self.log_every_n_groups = log_every_n_groups
         self.group_counter = 0
 
-    def log_task(self, prompt: str, expected_answer: str, expected_tools: List[Dict]):
+    def log_task(self, prompt: str, expected_answer: str, expected_tools: List[Dict], available_tools: int = 0):
         """Log task information"""
         if not self.verbose:
             return
@@ -158,6 +158,10 @@ class GRPOLogger:
         print_separator("━", 80)
         print(f"  {Colors.BOLD}{Colors.CYAN}📋 TASK #{self.group_counter + 1}{Colors.END}")
         print_separator("─", 80)
+
+        # Show available tools count
+        if available_tools > 0:
+            print(f"  {Colors.DIM}Available tools:{Colors.END} {Colors.CYAN}{available_tools}{Colors.END}")
 
         # Show prompt (first 200 chars)
         prompt_preview = prompt.replace('\n', ' ')[:200]
@@ -168,10 +172,10 @@ class GRPOLogger:
             answer_preview = expected_answer.replace('\n', ' ')[:150]
             print(f"  {Colors.DIM}Expected:{Colors.END} {Colors.GREEN}{truncate_text(answer_preview, 65)}{Colors.END}")
 
-        # Show expected tools
+        # Show expected tools (expected in response)
         if expected_tools:
             tools_str = ", ".join([t.get("name", "?") for t in expected_tools[:3]])
-            print(f"  {Colors.DIM}Tools:{Colors.END} {Colors.YELLOW}{tools_str}{Colors.END}")
+            print(f"  {Colors.DIM}Expected tools:{Colors.END} {Colors.YELLOW}{tools_str}{Colors.END}")
 
     def log_rollout_group(
         self,
@@ -830,11 +834,17 @@ class RolloutEnvironment:
                                         content = json_module.dumps(content)
                                     elif isinstance(content, list):
                                         content = " ".join(str(c) for c in content)
-                                    normalized_messages.append({
+                                    # Preserve tool_calls field from message
+                                    normalized_msg = {
                                         "role": msg.get("role", "user"),
                                         "content": str(content)
-                                    })
+                                    }
+                                    if "tool_calls" in msg:
+                                        normalized_msg["tool_calls"] = msg["tool_calls"]
+                                    normalized_messages.append(normalized_msg)
                                 sample["messages"] = normalized_messages
+                            # Preserve tools field for including in prompt
+                            # (tools field contains available tool definitions)
                             self.samples.append(sample)
                             loaded += 1
                         except Exception:
@@ -875,10 +885,13 @@ class RolloutEnvironment:
                                             content = json_module.dumps(content)
                                         elif isinstance(content, list):
                                             content = " ".join(str(c) for c in content)
-                                        normalized_messages.append({
+                                        normalized_msg = {
                                             "role": msg.get("role", "user"),
                                             "content": str(content)
-                                        })
+                                        }
+                                        if "tool_calls" in msg:
+                                            normalized_msg["tool_calls"] = msg["tool_calls"]
+                                        normalized_messages.append(normalized_msg)
                                     sample["messages"] = normalized_messages
                                 self.samples.append(sample)
                                 loaded += 1
@@ -896,7 +909,13 @@ class RolloutEnvironment:
                 self.samples = self._generate_synthetic_samples(max_samples)
 
             random.shuffle(self.samples)
+
+            # Count samples with tools
+            samples_with_tools = sum(1 for s in self.samples if s.get("tools"))
+            total_tools = sum(len(s.get("tools", [])) for s in self.samples)
             print(f"  {Colors.success('✓')} Loaded {len(self.samples)} samples total")
+            print(f"  {Colors.CYAN}ℹ{Colors.END} Samples with tools: {samples_with_tools}/{len(self.samples)} ({100*samples_with_tools/len(self.samples):.1f}%)")
+            print(f"  {Colors.CYAN}ℹ{Colors.END} Total tool definitions: {total_tools}")
 
         except Exception as e:
             print(f"  {Colors.error('✗')} Error loading dataset: {type(e).__name__}: {e}")
@@ -944,13 +963,38 @@ class RolloutEnvironment:
         expected_tools = []
         expected_answer = ""
 
-        system_prompt = """You are a helpful AI assistant with access to tools. When you need to use a tool, respond with:
+        # Extract tools from sample (Nemotron-Agentic format)
+        available_tools = sample.get("tools", [])
+
+        # Format tools for the system prompt
+        tools_description = ""
+        if available_tools:
+            tools_description = "\n\nAvailable tools:\n"
+            for tool in available_tools:
+                if isinstance(tool, dict):
+                    # OpenAI function calling format
+                    func = tool.get("function", tool)
+                    name = func.get("name", "")
+                    desc = func.get("description", "")
+                    params = func.get("parameters", {})
+
+                    tools_description += f"\n- {name}: {desc}\n"
+                    if params.get("properties"):
+                        tools_description += "  Parameters:\n"
+                        for param_name, param_info in params.get("properties", {}).items():
+                            param_type = param_info.get("type", "string")
+                            param_desc = param_info.get("description", "")
+                            required = param_name in params.get("required", [])
+                            req_str = " (required)" if required else ""
+                            tools_description += f"    - {param_name} ({param_type}){req_str}: {param_desc}\n"
+
+        system_prompt = f"""You are a helpful AI assistant with access to tools. When you need to use a tool, respond with:
 
 <tool_call>
-{"name": "tool_name", "arguments": {"arg1": "value1"}}
+{{"name": "tool_name", "arguments": {{"arg1": "value1"}}}}
 </tool_call>
 
-Think step by step before making tool calls."""
+Think step by step before making tool calls.{tools_description}"""
 
         prompt_parts.append(f"System: {system_prompt}\n")
 
@@ -966,8 +1010,9 @@ Think step by step before making tool calls."""
                 content = " ".join(str(c) for c in content)
 
             if role == "system":
-                # Use the actual system prompt if provided
-                prompt_parts = [f"System: {content}\n"]
+                # Append tools to the existing system prompt if provided
+                if content and content.strip():
+                    prompt_parts = [f"System: {content}{tools_description}\n"]
             elif role == "user":
                 prompt_parts.append(f"User: {content}\n")
             elif role == "assistant":
@@ -1068,7 +1113,8 @@ Think step by step before making tool calls."""
             prompt, expected_tools, expected_answer = self._format_prompt(sample)
 
             # Log task information
-            GRPO_LOGGER.log_task(prompt, expected_answer, expected_tools)
+            available_tools_count = len(sample.get("tools", []))
+            GRPO_LOGGER.log_task(prompt, expected_answer, expected_tools, available_tools_count)
 
             # Generate multiple rollouts per prompt (GRPO-style grouping)
             trajectories = []
