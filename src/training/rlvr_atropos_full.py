@@ -691,7 +691,10 @@ class RewardComputer:
         actual_tools = cls.extract_tool_calls(response)
         info["tool_calls"] = actual_tools
         info["has_tool_call"] = len(actual_tools) > 0
-        info["num_tool_calls"] = len(actual_tools)
+
+        # Use unique tool names for consistent accuracy calculation
+        actual_names = {t.get("name", "") for t in actual_tools}
+        info["num_tool_calls"] = len(actual_names)  # unique tool names
 
         reward = 0.0
 
@@ -702,7 +705,6 @@ class RewardComputer:
 
             if expected_tools:
                 expected_names = {t.get("name", "") for t in expected_tools}
-                actual_names = {t.get("name", "") for t in actual_tools}
 
                 matches = expected_names & actual_names
                 if matches:
