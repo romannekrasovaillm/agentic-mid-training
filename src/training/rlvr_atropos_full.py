@@ -537,9 +537,11 @@ class RolloutEnvironment:
         dataset_name: str,
         model_name: str,
         max_samples: int = 5000,
-        group_size: int = 4,
-        max_new_tokens: int = 512,
+        group_size: int = 2,  # Reduced for memory
+        max_new_tokens: int = 384,  # Reduced for memory
         temperature: float = 0.7,
+        max_queue_size: int = 64,  # Throttling: pause when queue exceeds this
+        generation_pause_time: float = 2.0,  # Seconds to pause
     ):
         self.vllm_url = vllm_url
         self.api_url = api_url
@@ -547,6 +549,8 @@ class RolloutEnvironment:
         self.group_size = group_size
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.max_queue_size = max_queue_size
+        self.generation_pause_time = generation_pause_time
 
         # Setup vLLM client
         self.vllm_client = OpenAI(base_url=vllm_url, api_key="EMPTY")
@@ -766,9 +770,10 @@ Think step by step before making tool calls."""
             self.stats["rollouts_pushed"] += len(trajectories)
 
     def run(self, num_rollouts: int = None):
-        """Generate rollouts continuously"""
+        """Generate rollouts continuously with throttling"""
         self.running = True
         sample_idx = 0
+        throttle_warned = False
 
         # Check if we have samples
         if not self.samples:
@@ -778,6 +783,18 @@ Think step by step before making tool calls."""
         while self.running:
             if num_rollouts and self.stats["rollouts_generated"] >= num_rollouts:
                 break
+
+            # THROTTLING: Pause if queue is too full
+            queue_size = TRAJECTORY_QUEUE.size()
+            if queue_size > self.max_queue_size:
+                if not throttle_warned:
+                    print(f"  {Colors.warning('⏸')} Queue full ({queue_size}), throttling generation...")
+                    throttle_warned = True
+                time.sleep(self.generation_pause_time)
+                continue
+            elif throttle_warned and queue_size < self.max_queue_size // 2:
+                print(f"  {Colors.success('▶')} Queue drained ({queue_size}), resuming generation")
+                throttle_warned = False
 
             # Get sample
             if sample_idx >= len(self.samples):
@@ -842,25 +859,28 @@ class RLVRConfig:
 
     # Training
     total_steps: int = 2000
-    batch_size: int = 8
+    batch_size: int = 4  # Reduced from 8 to save memory
     learning_rate: float = 1e-5
     max_grad_norm: float = 1.0
     gradient_accumulation: int = 4
+    steps_per_rollout: int = 2  # Multiple gradient steps per batch (reuse rollouts)
 
-    # Generation
-    group_size: int = 4  # Rollouts per prompt
-    max_new_tokens: int = 512
+    # Generation (throttling)
+    group_size: int = 2  # Reduced from 4 - fewer samples per prompt
+    max_new_tokens: int = 384  # Reduced from 512
     temperature: float = 0.7
+    max_queue_size: int = 64  # Pause generation when queue exceeds this
+    generation_pause_time: float = 2.0  # Seconds to pause when queue full
 
     # Policy gradient
     entropy_coef: float = 0.01
     reward_scale: float = 1.0
     baseline_momentum: float = 0.99
 
-    # LoRA
+    # LoRA (reduced for memory)
     use_lora: bool = True
-    lora_r: int = 64
-    lora_alpha: int = 128
+    lora_r: int = 32  # Reduced from 64
+    lora_alpha: int = 64  # Reduced from 128
 
     # Logging
     log_steps: int = 10
@@ -1154,7 +1174,7 @@ class FullRLVRTrainer:
         print(Colors.success(f"✓ Saved checkpoint: {ckpt_dir}"))
 
     def train(self):
-        """Main training loop"""
+        """Main training loop with memory optimization"""
         print_box(
             "FULL ATROPOS RLVR TRAINER",
             [
@@ -1167,6 +1187,8 @@ class FullRLVRTrainer:
                 f"LR: {self.config.learning_rate}",
                 "",
                 f"Group size: {self.config.group_size}",
+                f"Steps/rollout: {self.config.steps_per_rollout}",
+                f"Max queue: {self.config.max_queue_size}",
                 f"Entropy coef: {self.config.entropy_coef}",
             ],
             width=70
@@ -1182,7 +1204,7 @@ class FullRLVRTrainer:
         )
 
         for step in progress:
-            # Wait for batch
+            # Wait for batch (smaller batch for memory)
             batch = []
             wait_start = time.time()
             while len(batch) < self.config.batch_size:
@@ -1196,19 +1218,24 @@ class FullRLVRTrainer:
                         wait_start = time.time()
                     time.sleep(0.5)
 
-            # Train step
-            step_metrics = self.train_on_batch(batch)
+            # Multiple gradient steps per batch (reuse rollouts)
+            for _ in range(self.config.steps_per_rollout):
+                step_metrics = self.train_on_batch(batch)
 
-            # Gradient step
-            if (step + 1) % self.config.gradient_accumulation == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.config.max_grad_norm
-                ).item()
-                self.metrics.gradient_norms.append(grad_norm)
+                # Gradient step
+                if (step + 1) % self.config.gradient_accumulation == 0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config.max_grad_norm
+                    ).item()
+                    self.metrics.gradient_norms.append(grad_norm)
 
-                self.optimizer.step()
-                self.optimizer.zero_grad()
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+
+            # Memory cleanup every 10 steps
+            if (step + 1) % 10 == 0:
+                torch.cuda.empty_cache()
 
             # Update progress
             summary = self.metrics.get_summary()
@@ -1274,13 +1301,18 @@ def main():
 
     # Training
     parser.add_argument("--total-steps", type=int, default=2000)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=4, help="Reduced for memory")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--max-samples", type=int, default=5000)
+    parser.add_argument("--steps-per-rollout", type=int, default=2,
+                        help="Gradient steps per batch (reuse rollouts)")
 
-    # Generation
-    parser.add_argument("--group-size", type=int, default=4)
+    # Generation (with throttling)
+    parser.add_argument("--group-size", type=int, default=2, help="Rollouts per prompt (reduced)")
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--max-queue-size", type=int, default=64,
+                        help="Pause generation when queue exceeds this")
+    parser.add_argument("--max-new-tokens", type=int, default=384, help="Reduced for memory")
 
     # Logging
     parser.add_argument("--log-steps", type=int, default=10)
@@ -1307,6 +1339,9 @@ def main():
         temperature=args.temperature,
         log_steps=args.log_steps,
         save_steps=args.save_steps,
+        steps_per_rollout=args.steps_per_rollout,
+        max_queue_size=args.max_queue_size,
+        max_new_tokens=args.max_new_tokens,
     )
 
     print_box(
@@ -1343,15 +1378,18 @@ def main():
         api_thread.start()
         time.sleep(1)
 
-        # 2. Start Environment
+        # 2. Start Environment (with throttling)
         env = RolloutEnvironment(
             vllm_url=args.vllm_url,
             api_url=config.api_url,
             dataset_name=args.dataset,
             model_name=args.model,
             max_samples=args.max_samples,
-            group_size=args.group_size,
+            group_size=config.group_size,
+            max_new_tokens=config.max_new_tokens,
             temperature=args.temperature,
+            max_queue_size=config.max_queue_size,
+            generation_pause_time=config.generation_pause_time,
         )
 
         env_thread = threading.Thread(target=env.run, daemon=True)
