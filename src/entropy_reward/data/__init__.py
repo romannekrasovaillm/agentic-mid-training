@@ -189,7 +189,6 @@ class NemotronAgenticLoader:
             "nvidia/Nemotron-Agentic-v1",
             split=self.split,
             cache_dir=self.cache_dir,
-            trust_remote_code=True,
         )
 
         logger.info(f"Loaded {len(ds)} raw examples from split={self.split}")
