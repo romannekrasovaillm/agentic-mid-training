@@ -48,6 +48,18 @@ from entropy_reward.utils.config_loader import ExperimentConfig, ModelConfig
 
 logger = logging.getLogger(__name__)
 
+# Max chars to show for prompt/rollout snippets in logs
+_SNIPPET_HEAD = 120
+_SNIPPET_TAIL = 80
+
+
+def _snippet(text: str, head: int = _SNIPPET_HEAD, tail: int = _SNIPPET_TAIL) -> str:
+    """Return head...tail preview of text for logging."""
+    text = text.replace("\n", " ↵ ").strip()
+    if len(text) <= head + tail + 5:
+        return text
+    return text[:head] + " … " + text[-tail:]
+
 
 class GRPOTrainer:
     """GRPO trainer with entropy-stability experiments."""
@@ -233,6 +245,21 @@ class GRPOTrainer:
         r_acc = torch.tensor([r.r_acc for r in rewards_list], device=self.device)
         r_total = torch.tensor([r.r_total for r in rewards_list], device=self.device)
 
+        # --- Verbose per-sample logging ---
+        logger.debug(f"[Step {step}] === PROMPTS & ROLLOUTS ({len(prompts)} prompts × {group_size} rollouts) ===")
+        idx = 0
+        for pi, prompt in enumerate(prompts):
+            logger.debug(f"  ┌─ Prompt {pi}: {_snippet(prompt)}")
+            for gi in range(group_size):
+                r = rewards_list[idx]
+                logger.debug(
+                    f"  │  Rollout {gi}: R_fmt={r.r_format:.2f} R_tool={r.r_tool:.2f} "
+                    f"R_acc={r.r_acc:.2f} R_total={r.r_total:.2f}"
+                )
+                logger.debug(f"  │    ▸ {_snippet(all_texts[idx])}")
+                idx += 1
+            logger.debug(f"  └─")
+
         # 3) Compute advantages
         if self.config.reward.separate_baselines:
             components = {"format": r_format, "tool": r_tool, "acc": r_acc}
@@ -348,6 +375,26 @@ class GRPOTrainer:
             adv_std=astats.std,
         )
 
+        # Build per-sample detail list for external verbose logging
+        rollout_details = []
+        idx = 0
+        for pi, prompt in enumerate(prompts):
+            for gi in range(group_size):
+                r = rewards_list[idx]
+                rollout_details.append({
+                    "prompt_idx": pi,
+                    "rollout_idx": gi,
+                    "prompt_snippet": _snippet(prompt),
+                    "output_snippet": _snippet(all_texts[idx]),
+                    "output_len": len(all_texts[idx]),
+                    "r_format": r.r_format,
+                    "r_tool": r.r_tool,
+                    "r_acc": r.r_acc,
+                    "r_total": r.r_total,
+                    "advantage": advantages[idx].item(),
+                })
+                idx += 1
+
         return {
             "loss": loss.item(),
             "pg_loss": pg_loss.item(),
@@ -357,6 +404,7 @@ class GRPOTrainer:
             "action_entropy": ae,
             "entropy_coeff": self.entropy_bonus.get_coeff(),
             "kl_coeff": kl_coeff,
+            "kl_raw": kl_raw.item(),
             "self_bleu": sb,
             "uniqueness": tu,
             "pattern_repetition": pr,
@@ -368,8 +416,13 @@ class GRPOTrainer:
             "adv_std": astats.std,
             "adv_min": astats.min,
             "adv_max": astats.max,
+            "adv_skew": astats.skew,
+            "adv_kurtosis": astats.kurtosis,
+            "adv_frac_positive": astats.fraction_positive,
             "calls_per_step": sum(1 for a in actions if a != "no_action") / len(prompts),
+            "tool_frequencies": tool_freqs,
             "n_generated": len(all_texts),
+            "rollout_details": rollout_details,
             "should_stop": stop_signal.should_stop,
             "stop_reason": stop_signal.reason.value,
         }

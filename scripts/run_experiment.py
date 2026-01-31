@@ -278,11 +278,13 @@ def main():
     import time as _time
     _train_start = _time.time()
     _interval_start = _time.time()
-    _interval_metrics = {
-        "loss": [], "pg_loss": [], "entropy_bonus": [], "kl_penalty": [],
-        "token_entropy": [], "action_entropy": [], "self_bleu": [],
-        "uniqueness": [], "r_format": [], "r_tool": [], "r_acc": [],
-    }
+    _AGG_KEYS = [
+        "loss", "pg_loss", "entropy_bonus", "kl_penalty", "kl_raw",
+        "token_entropy", "action_entropy", "self_bleu", "uniqueness",
+        "pattern_repetition", "r_format", "r_tool", "r_acc", "r_total",
+        "calls_per_step",
+    ]
+    _interval_metrics: dict[str, list[float]] = {k: [] for k in _AGG_KEYS}
 
     for step in range(1, total_steps + 1):
         # Sample batch from Nemotron data
@@ -298,7 +300,7 @@ def main():
         metrics = trainer.train_step(batch_prompts, batch_acc, step)
 
         # Accumulate metrics for averaging
-        for k in _interval_metrics:
+        for k in _AGG_KEYS:
             if k in metrics:
                 _interval_metrics[k].append(metrics[k])
 
@@ -309,53 +311,109 @@ def main():
             steps_per_sec = log_interval / interval_time if interval_time > 0 else 0
             eta_secs = (total_steps - step) / steps_per_sec if steps_per_sec > 0 else 0
 
-            # Compute averages
+            # Compute averages over interval
             avg = {}
             for k, vals in _interval_metrics.items():
                 avg[k] = sum(vals) / len(vals) if vals else 0.0
 
             log.info("")
-            log.info("=" * 72)
+            log.info("=" * 80)
             log.info(
                 f"  STEP {step}/{total_steps}  |  "
                 f"elapsed {elapsed:.0f}s  |  "
                 f"{steps_per_sec:.2f} step/s  |  "
                 f"ETA {eta_secs/60:.0f}min"
             )
-            log.info("-" * 72)
+            log.info("=" * 80)
+
+            # ── Loss breakdown ──
             log.info(
-                f"  Loss:     total={avg['loss']:.4f}  "
+                f"  Loss:       total={avg['loss']:.4f}  "
                 f"pg={avg['pg_loss']:.4f}  "
-                f"H_bonus={avg['entropy_bonus']:.4f}  "
+                f"H_bonus={avg['entropy_bonus']:.5f}  "
                 f"KL_pen={avg['kl_penalty']:.4f}"
             )
+
+            # ── Decomposed rewards (interval average) ──
             log.info(
-                f"  Reward:   R_fmt={avg['r_format']:.3f}  "
+                f"  Reward avg: R_fmt={avg['r_format']:.3f}  "
                 f"R_tool={avg['r_tool']:.3f}  "
-                f"R_acc={avg['r_acc']:.3f}"
+                f"R_acc={avg['r_acc']:.3f}  "
+                f"R_total={avg['r_total']:.3f}"
             )
+
+            # ── Entropy ──
             log.info(
-                f"  Entropy:  H_token={avg['token_entropy']:.4f}  "
+                f"  Entropy:    H_token={avg['token_entropy']:.4f}  "
                 f"H_action={avg['action_entropy']:.4f}  "
-                f"coeff={metrics.get('entropy_coeff', 0):.4f}"
+                f"coeff={metrics.get('entropy_coeff', 0):.5f}"
             )
+
+            # ── KL ──
             log.info(
-                f"  Diversity: self-BLEU={avg['self_bleu']:.4f}  "
-                f"uniqueness={avg['uniqueness']:.4f}"
+                f"  KL:         raw={avg['kl_raw']:.4f}  "
+                f"coeff={metrics.get('kl_coeff', 0):.4f}  "
+                f"penalty={avg['kl_penalty']:.4f}"
             )
+
+            # ── Diversity ──
             log.info(
-                f"  Advantage: mean={metrics.get('adv_mean', 0):.4f}  "
+                f"  Diversity:  self-BLEU={avg['self_bleu']:.4f}  "
+                f"uniqueness={avg['uniqueness']:.4f}  "
+                f"pattern_rep={avg['pattern_repetition']:.4f}"
+            )
+
+            # ── Advantage distribution (last step in interval) ──
+            log.info(
+                f"  Advantage:  mean={metrics.get('adv_mean', 0):.4f}  "
                 f"std={metrics.get('adv_std', 0):.4f}  "
                 f"min={metrics.get('adv_min', 0):.4f}  "
-                f"max={metrics.get('adv_max', 0):.4f}"
+                f"max={metrics.get('adv_max', 0):.4f}  "
+                f"skew={metrics.get('adv_skew', 0):.3f}  "
+                f"kurt={metrics.get('adv_kurtosis', 0):.3f}  "
+                f"frac+={metrics.get('adv_frac_positive', 0):.2f}"
             )
+
+            # ── Tool call stats ──
+            log.info(
+                f"  Tools:      calls/step={avg['calls_per_step']:.2f}  "
+                f"generated={metrics.get('n_generated', 0)}"
+            )
+            # Top-5 tool frequencies from last step
+            tf = metrics.get("tool_frequencies", {})
+            if tf:
+                top5 = sorted(tf.items(), key=lambda x: -x[1])[:5]
+                tf_str = "  ".join(f"{t}={f:.2f}" for t, f in top5)
+                log.info(f"  Top tools:  {tf_str}")
+
+            # ── GPU memory ──
             if torch.cuda.is_available():
-                log.info(f"  GPU mem:  {_gpu_mem_str()}")
-            log.info("=" * 72)
+                log.info(f"  GPU mem:    {_gpu_mem_str()}")
+
+            # ── Prompt & Rollout samples (last step) ──
+            rollout_details = metrics.get("rollout_details", [])
+            if rollout_details:
+                log.info("-" * 80)
+                log.info("  LAST-STEP PROMPTS & ROLLOUTS:")
+                current_prompt = -1
+                for rd in rollout_details:
+                    pi = rd["prompt_idx"]
+                    gi = rd["rollout_idx"]
+                    if pi != current_prompt:
+                        current_prompt = pi
+                        log.info(f"  ┌─ Prompt {pi}: {rd['prompt_snippet']}")
+                    log.info(
+                        f"  │ [{gi}] R_fmt={rd['r_format']:.1f} R_tool={rd['r_tool']:.1f} "
+                        f"R_acc={rd['r_acc']:.2f} R_total={rd['r_total']:.2f} "
+                        f"adv={rd['advantage']:+.3f} len={rd['output_len']}"
+                    )
+                    log.info(f"  │     ▸ {rd['output_snippet']}")
+                log.info(f"  └─")
+            log.info("=" * 80)
 
             # Reset interval tracking
             _interval_start = _time.time()
-            for k in _interval_metrics:
+            for k in _AGG_KEYS:
                 _interval_metrics[k] = []
 
         # Eval
