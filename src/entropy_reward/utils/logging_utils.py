@@ -78,7 +78,12 @@ class RewardLogger:
 
             self._wandb = wandb.init(project=project, name=run_name, config=config)
         except ImportError:
-            pass
+            logging.getLogger(__name__).info("wandb not installed — logging to JSONL only")
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                f"wandb init failed ({exc}) — logging to JSONL only"
+            )
+            self._wandb = None
 
     def log_step(self, log: StepLog):
         log.wall_time = time.time() - self._start_time
