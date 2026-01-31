@@ -5,8 +5,8 @@
 # in the trainer handles forward-pass logits for GRPO loss and KL computation.
 #
 # NOTE: GigaChat3 uses FP8-quantized MoE experts. The default flashinfer_cutlass
-# MoE kernel requires CUDA 12.7+ for FP8 block scaling. On CUDA ≤12.6 we force
-# the Triton MoE backend via VLLM_FUSED_MOE_BACKEND=triton.
+# MoE kernel requires CUDA 12.7+ for FP8 block scaling. On CUDA ≤12.6 we
+# disable flashinfer/deepgemm FP8 MoE backends to force Triton fallback.
 #
 # Usage:
 #   bash scripts/start_vllm_server.sh                       # defaults
@@ -22,7 +22,6 @@
 #   MAX_MODEL_LEN       — max context     (default: 4096)
 #   DTYPE               — dtype           (default: bfloat16)
 #   ENFORCE_EAGER       — 0 or 1          (default: 1 for MoE stability)
-#   MOE_BACKEND         — triton|cutlass  (default: triton for CUDA ≤12.6)
 
 set -euo pipefail
 
@@ -34,7 +33,6 @@ GPU_MEMORY_UTIL="${GPU_MEMORY_UTIL:-0.45}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 DTYPE="${DTYPE:-bfloat16}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-1}"
-MOE_BACKEND="${MOE_BACKEND:-triton}"
 
 # Parse CLI overrides
 while [[ $# -gt 0 ]]; do
@@ -48,14 +46,21 @@ while [[ $# -gt 0 ]]; do
         --dtype)       DTYPE="$2";           shift 2 ;;
         --eager)       ENFORCE_EAGER=1;      shift ;;
         --no-eager)    ENFORCE_EAGER=0;      shift ;;
-        --moe-backend) MOE_BACKEND="$2";     shift 2 ;;
         *)             echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
 
-# Force Triton MoE backend to avoid flashinfer CUTLASS FP8 block scaling
-# error on CUDA ≤12.6: "FP8 block scaling not implemented for CUDA 12.6 or lower"
-export VLLM_FUSED_MOE_BACKEND="${MOE_BACKEND}"
+# ── FP8 MoE backend workaround ──────────────────────────────────────
+# Disable flashinfer CUTLASS FP8 MoE kernels — they require CUDA 12.7+
+# for FP8 block scaling. This forces vLLM to fall back to Triton MoE.
+# See: https://github.com/vllm-project/vllm/issues/24109
+export VLLM_USE_FLASHINFER_MOE_FP8=0
+export VLLM_USE_FLASHINFER_MOE_FP16=0
+export VLLM_USE_FLASHINFER_MOE_FP4=0
+# Also disable DeepGEMM in case it's available but incompatible
+export VLLM_MOE_USE_DEEP_GEMM=0
+# General fused MoE backend override (non-quantized path)
+export VLLM_FUSED_MOE_BACKEND=triton
 
 echo "═══════════════════════════════════════════════════════════════"
 echo "  vLLM Server"
@@ -66,7 +71,7 @@ echo "  GPU mem util:     ${GPU_MEMORY_UTIL}"
 echo "  Max model len:    ${MAX_MODEL_LEN}"
 echo "  Dtype:            ${DTYPE}"
 echo "  Enforce eager:    ${ENFORCE_EAGER}"
-echo "  MoE backend:      ${MOE_BACKEND} (VLLM_FUSED_MOE_BACKEND)"
+echo "  FP8 MoE:          flashinfer=OFF  deepgemm=OFF  → Triton"
 echo "═══════════════════════════════════════════════════════════════"
 
 CMD=(
