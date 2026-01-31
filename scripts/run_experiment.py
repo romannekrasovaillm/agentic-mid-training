@@ -187,6 +187,9 @@ def _maybe_launch_vllm_server(config: ExperimentConfig) -> "subprocess.Popen | N
         "MAX_MODEL_LEN": str(vcfg.max_model_len),
         "DTYPE": config.model.torch_dtype,
         "ENFORCE_EAGER": "1" if vcfg.enforce_eager else "0",
+        # Force Triton MoE backend — flashinfer CUTLASS FP8 block scaling
+        # requires CUDA 12.7+, most setups have 12.6 or lower.
+        "MOE_BACKEND": "triton",
     }
 
     log.info(f"Launching vLLM server (port={port}, tp={vcfg.tensor_parallel_size}, "

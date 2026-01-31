@@ -97,7 +97,7 @@ vllm:
   tensor_parallel_size: 1  # H200 single GPU is enough for 10B MoE
   gpu_memory_utilization: 0.45  # leave room for HF policy + ref models
   max_model_len: 4096
-  enforce_eager: false
+  enforce_eager: true  # avoid torch.compile issues with MoE FP8
   launch_server: false  # auto-start vLLM from run_experiment.py
   server_timeout: 300.0
   max_retries: 3
