@@ -15,9 +15,15 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
-from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 
 logger = logging.getLogger(__name__)
+
+# Mapping from split name to filename inside the dataset repo.
+_SPLIT_FILES = {
+    "tool_calling": "data/tool_calling.jsonl",
+    "interactive_agent": "data/interactive_agent.jsonl",
+}
 
 
 @dataclass
@@ -39,6 +45,31 @@ class AgenticSample:
     has_reasoning: bool = False
     # Number of turns in the original conversation
     num_turns: int = 0
+
+
+def _normalize_content(content: Any) -> str:
+    """Normalize message content to a plain string.
+
+    The Nemotron-Agentic-v1 dataset stores ``content`` as either a plain
+    string or a structured object (list of content blocks / dict).  This
+    helper coerces any variant into a single string.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # List of content blocks, e.g. [{"type": "text", "text": "..."}]
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(block.get("text", str(block)))
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        return content.get("text", json.dumps(content, ensure_ascii=False))
+    return str(content)
 
 
 def _extract_tool_names(tools: list[dict]) -> list[str]:
@@ -63,7 +94,7 @@ def _build_prompt(messages: list[dict], tools: list[dict]) -> str:
     # System message
     for msg in messages:
         if msg.get("role") == "system":
-            content = msg.get("content", "")
+            content = _normalize_content(msg.get("content"))
             if content:
                 parts.append(f"[System]\n{content}")
             break
@@ -82,7 +113,7 @@ def _build_prompt(messages: list[dict], tools: list[dict]) -> str:
     # User turns up to first assistant response
     for msg in messages:
         role = msg.get("role", "")
-        content = msg.get("content", "")
+        content = _normalize_content(msg.get("content"))
         if role == "user" and content:
             parts.append(f"[User]\n{content}")
             break  # Take first user turn as the prompt
@@ -97,7 +128,7 @@ def _build_multiturn_prompt(messages: list[dict], tools: list[dict], max_turns: 
     # System
     for msg in messages:
         if msg.get("role") == "system":
-            content = msg.get("content", "")
+            content = _normalize_content(msg.get("content"))
             if content:
                 parts.append(f"[System]\n{content}")
             break
@@ -118,7 +149,7 @@ def _build_multiturn_prompt(messages: list[dict], tools: list[dict], max_turns: 
     last_user_idx = -1
     for i, msg in enumerate(messages):
         role = msg.get("role", "")
-        content = msg.get("content", "")
+        content = _normalize_content(msg.get("content"))
 
         if role == "system":
             continue
@@ -153,9 +184,9 @@ def _extract_reference(messages: list[dict]) -> tuple[str, list[dict]]:
     """Extract the first assistant response and its tool calls as reference."""
     for msg in messages:
         if msg.get("role") == "assistant":
-            content = msg.get("content", "") or ""
+            content = _normalize_content(msg.get("content")) or ""
             tool_calls = msg.get("tool_calls", []) or []
-            reasoning = msg.get("reasoning_content", "") or ""
+            reasoning = _normalize_content(msg.get("reasoning_content")) or ""
             if reasoning:
                 content = f"<think>{reasoning}</think>\n{content}"
             return content, tool_calls
@@ -182,27 +213,43 @@ class NemotronAgenticLoader:
         self.cache_dir = cache_dir
 
     def load(self) -> list[AgenticSample]:
-        """Load dataset and convert to AgenticSample list."""
+        """Load dataset and convert to AgenticSample list.
+
+        Downloads the raw JSONL file via huggingface_hub and parses each
+        line with json.loads().  This bypasses the datasets library's
+        Arrow/PyArrow pipeline which fails on Nemotron-Agentic-v1 due to
+        heterogeneous nested schemas (content field alternating between
+        string and object, varying tool parameter structures across rows).
+        """
         logger.info(f"Loading nvidia/Nemotron-Agentic-v1 split={self.split}")
 
-        # Use streaming=True to avoid Arrow schema cast errors —
-        # Nemotron-Agentic-v1 has heterogeneous nested tool parameter
-        # schemas across examples that cannot be reconciled into a
-        # single Arrow table by the datasets library.
-        ds = load_dataset(
-            "nvidia/Nemotron-Agentic-v1",
-            split=self.split,
-            cache_dir=self.cache_dir,
-            streaming=True,
+        filename = _SPLIT_FILES.get(self.split)
+        if filename is None:
+            raise ValueError(
+                f"Unknown split '{self.split}'. "
+                f"Available: {list(_SPLIT_FILES.keys())}"
+            )
+
+        local_path = hf_hub_download(
+            repo_id="nvidia/Nemotron-Agentic-v1",
+            filename=filename,
+            repo_type="dataset",
+            cache_dir=self.cache_dir or None,
         )
+        logger.info(f"Downloaded {filename} -> {local_path}")
 
         samples = []
         raw_count = 0
-        for row in ds:
-            raw_count += 1
-            sample = self._process_row(row)
-            if sample is not None:
-                samples.append(sample)
+        with open(local_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                raw_count += 1
+                row = json.loads(line)
+                sample = self._process_row(row)
+                if sample is not None:
+                    samples.append(sample)
 
         logger.info(f"Loaded {raw_count} raw examples from split={self.split}")
 
