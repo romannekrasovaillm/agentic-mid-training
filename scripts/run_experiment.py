@@ -416,16 +416,20 @@ def main():
 
         # Short per-step progress (every step when not at dashboard interval)
         if step % log_interval != 0:
-            if step <= 3 or step % 10 == 0:
+            if step <= 5 or step % 10 == 0:
                 log.info(
                     f"  step {step}/{total_steps}  "
                     f"{step_time:.1f}s/step  "
                     f"loss={metrics['loss']:.4f}  "
-                    f"R={metrics['r_total']:.3f}"
+                    f"pg={metrics['pg_loss']:.4f}  "
+                    f"R={metrics['r_total']:.3f}  "
+                    f"H_tok={metrics['token_entropy']:.3f}  "
+                    f"KL={metrics['kl_raw']:.4f}  "
+                    f"BLEU={metrics['self_bleu']:.3f}"
                 )
 
-        # Verbose log every log_interval steps
-        if step % log_interval == 0:
+        # Verbose log every log_interval steps + first 5 steps for visibility
+        if step % log_interval == 0 or step <= 5:
             elapsed = _time.time() - _train_start
             interval_time = _time.time() - _interval_start
             steps_per_sec = log_interval / interval_time if interval_time > 0 else 0
@@ -494,10 +498,20 @@ def main():
                 f"frac+={metrics.get('adv_frac_positive', 0):.2f}"
             )
 
+            # ── Generation timing ──
+            gen_t = metrics.get("gen_time", 0)
+            gen_m = metrics.get("gen_mode", "?")
+            n_gen = metrics.get("n_generated", 0)
+            log.info(
+                f"  Generation: {n_gen} rollouts in {gen_t:.1f}s "
+                f"({gen_t / max(n_gen, 1):.2f}s/each)  "
+                f"mode={gen_m}"
+            )
+
             # ── Tool call stats ──
             log.info(
                 f"  Tools:      calls/step={avg['calls_per_step']:.2f}  "
-                f"generated={metrics.get('n_generated', 0)}"
+                f"generated={n_gen}"
             )
             # Top-5 tool frequencies from last step
             tf = metrics.get("tool_frequencies", {})
@@ -531,10 +545,11 @@ def main():
                 log.info(f"  └─")
             log.info("=" * 80)
 
-            # Reset interval tracking
-            _interval_start = _time.time()
-            for k in _AGG_KEYS:
-                _interval_metrics[k] = []
+            # Reset interval tracking (only at real log_interval boundaries)
+            if step % log_interval == 0:
+                _interval_start = _time.time()
+                for k in _AGG_KEYS:
+                    _interval_metrics[k] = []
 
         # Eval
         if step % eval_interval == 0:

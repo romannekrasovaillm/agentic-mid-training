@@ -268,10 +268,10 @@ class GRPOTrainer:
                 f"    [vLLM] Sending {total_gen} prompts for batched generation..."
             )
             all_texts = self.vllm_client.generate_batch(expanded_prompts)
-            elapsed = time.time() - t_gen_start
+            gen_elapsed = time.time() - t_gen_start
             logger.info(
-                f"    [vLLM] {total_gen} rollouts in {elapsed:.1f}s "
-                f"({elapsed / max(total_gen, 1):.2f}s/rollout)"
+                f"    [vLLM] {total_gen} rollouts in {gen_elapsed:.1f}s "
+                f"({gen_elapsed / max(total_gen, 1):.2f}s/rollout)"
             )
         else:
             # ── Slow path: sequential HF generation ──
@@ -291,6 +291,7 @@ class GRPOTrainer:
                             f"{elapsed:.1f}s  "
                             f"({elapsed/gen_idx:.2f}s/rollout)"
                         )
+            gen_elapsed = time.time() - t_gen_start
 
         # 2) Compute decomposed rewards
         rewards_list = self.reward_fn.compute_batch(all_texts, all_acc)
@@ -553,6 +554,8 @@ class GRPOTrainer:
             "calls_per_step": sum(1 for a in actions if a != "no_action") / len(prompts),
             "tool_frequencies": tool_freqs,
             "n_generated": len(all_texts),
+            "gen_time": gen_elapsed,
+            "gen_mode": "vllm" if self.vllm_client is not None else "hf",
             "rollout_details": rollout_details,
             "should_stop": stop_signal.should_stop,
             "stop_reason": stop_signal.reason.value,
