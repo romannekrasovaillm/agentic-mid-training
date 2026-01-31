@@ -185,19 +185,26 @@ class NemotronAgenticLoader:
         """Load dataset and convert to AgenticSample list."""
         logger.info(f"Loading nvidia/Nemotron-Agentic-v1 split={self.split}")
 
+        # Use streaming=True to avoid Arrow schema cast errors —
+        # Nemotron-Agentic-v1 has heterogeneous nested tool parameter
+        # schemas across examples that cannot be reconciled into a
+        # single Arrow table by the datasets library.
         ds = load_dataset(
             "nvidia/Nemotron-Agentic-v1",
             split=self.split,
             cache_dir=self.cache_dir,
+            streaming=True,
         )
 
-        logger.info(f"Loaded {len(ds)} raw examples from split={self.split}")
-
         samples = []
+        raw_count = 0
         for row in ds:
+            raw_count += 1
             sample = self._process_row(row)
             if sample is not None:
                 samples.append(sample)
+
+        logger.info(f"Loaded {raw_count} raw examples from split={self.split}")
 
         if self.max_samples > 0 and len(samples) > self.max_samples:
             rng = random.Random(self.seed)
