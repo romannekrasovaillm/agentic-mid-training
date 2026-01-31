@@ -188,10 +188,14 @@ class GRPOTrainer:
             # apply_chat_template may return a tensor or a BatchEncoding
             if hasattr(encoded, "input_ids"):
                 input_ids = encoded["input_ids"].to(self.device)
+                attention_mask = encoded.get("attention_mask")
+                if attention_mask is not None:
+                    attention_mask = attention_mask.to(self.device)
             else:
                 input_ids = encoded.to(self.device)
                 if input_ids.dim() == 1:
                     input_ids = input_ids.unsqueeze(0)
+                attention_mask = None
             prompt_len = input_ids.shape[1]
         else:
             encoded = self.tokenizer(
@@ -199,11 +203,18 @@ class GRPOTrainer:
                 max_length=self.config.training.max_seq_len,
             ).to(self.device)
             input_ids = encoded["input_ids"]
+            attention_mask = encoded.get("attention_mask")
             prompt_len = input_ids.shape[1]
+
+        # Build explicit attention_mask if not provided (fixes warning
+        # when pad_token == eos_token)
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
 
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=gen_cfg.max_new_tokens,
                 do_sample=gen_cfg.do_sample,
                 temperature=gen_cfg.temperature,
