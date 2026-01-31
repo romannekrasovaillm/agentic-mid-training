@@ -121,13 +121,13 @@ class StopConfig:
 
 @dataclass
 class VLLMConfig:
-    enabled: bool = False
+    enabled: bool = True
     base_url: str = "http://localhost:8000"
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.45
     max_model_len: int = 4096
-    enforce_eager: bool = False
-    launch_server: bool = False  # auto-launch vLLM server from run_experiment
+    enforce_eager: bool = True  # avoid torch.compile issues with MoE FP8
+    launch_server: bool = True  # auto-launch vLLM server from run_experiment
     server_timeout: float = 300.0  # seconds to wait for server readiness
     max_retries: int = 3
     request_timeout: float = 300.0

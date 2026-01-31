@@ -92,13 +92,13 @@ stop:
 # vLLM server for fast batched generation (rollouts).
 # HF model is still used for forward-pass logits (GRPO loss) and KL.
 vllm:
-  enabled: false  # set true to use vLLM for generation
+  enabled: true  # use vLLM for fast batched rollout generation
   base_url: "http://localhost:8000"
   tensor_parallel_size: 1  # H200 single GPU is enough for 10B MoE
   gpu_memory_utilization: 0.45  # leave room for HF policy + ref models
   max_model_len: 4096
   enforce_eager: true  # avoid torch.compile issues with MoE FP8
-  launch_server: false  # auto-start vLLM from run_experiment.py
+  launch_server: true  # auto-start vLLM from run_experiment.py
   server_timeout: 300.0
   max_retries: 3
   request_timeout: 300.0

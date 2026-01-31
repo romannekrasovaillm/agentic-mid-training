@@ -177,19 +177,20 @@ class TestVLLMConfig:
         from entropy_reward.utils.config_loader import VLLMConfig
 
         cfg = VLLMConfig()
-        assert cfg.enabled is False
+        assert cfg.enabled is True
         assert cfg.base_url == "http://localhost:8000"
         assert cfg.tensor_parallel_size == 1
         assert cfg.gpu_memory_utilization == 0.45
         assert cfg.max_model_len == 4096
-        assert cfg.launch_server is False
+        assert cfg.launch_server is True
+        assert cfg.enforce_eager is True
 
     def test_config_in_experiment(self):
         from entropy_reward.utils.config_loader import ExperimentConfig
 
         cfg = ExperimentConfig()
         assert hasattr(cfg, "vllm")
-        assert cfg.vllm.enabled is False
+        assert cfg.vllm.enabled is True
 
     def test_config_from_yaml(self, tmp_path):
         from entropy_reward.utils.config_loader import load_config
