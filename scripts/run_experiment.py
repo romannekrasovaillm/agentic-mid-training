@@ -93,16 +93,26 @@ def load_model_and_tokenizer(config: ExperimentConfig):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Model kwargs
+    # Model kwargs — use `dtype` (torch_dtype is deprecated in newer transformers)
     model_kwargs = dict(
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map=mcfg.device_map,
         trust_remote_code=mcfg.trust_remote_code,
     )
 
-    # Attention implementation (flash_attention_2, sdpa, eager)
-    if mcfg.attn_implementation:
-        model_kwargs["attn_implementation"] = mcfg.attn_implementation
+    # Attention implementation — auto-detect flash-attn availability
+    attn_impl = mcfg.attn_implementation
+    if attn_impl == "flash_attention_2":
+        try:
+            import flash_attn  # noqa: F401
+        except ImportError:
+            log.warning(
+                "flash_attn not installed — falling back to sdpa "
+                "(scaled dot-product attention)"
+            )
+            attn_impl = "sdpa"
+    if attn_impl:
+        model_kwargs["attn_implementation"] = attn_impl
 
     # Memory constraints
     if mcfg.max_memory:
