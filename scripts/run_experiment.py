@@ -254,6 +254,10 @@ def _gpu_mem_str() -> str:
 def main():
     args = parse_args()
 
+    # Reduce CUDA memory fragmentation (helps when sharing GPU with vLLM)
+    import os
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     # Load config
     overrides = json.loads(args.override) if args.override else None
 

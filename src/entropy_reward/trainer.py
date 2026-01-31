@@ -321,55 +321,132 @@ class GRPOTrainer:
         else:
             advantages = self.baseline.compute_advantages(r_total, group_size)
 
-        # 4) Forward pass for logits
+        # 4-9) Chunked forward pass, loss computation, and backward
+        # Processing all 32 sequences at once OOMs on large-vocab MoE models
+        # (32 × seq_len × 150K vocab × 2 bytes = ~5-10 GiB per logits tensor).
+        # Instead, process in mini-batches and accumulate gradients.
         batch_inputs = self.tokenizer(
             all_texts, return_tensors="pt", padding=True, truncation=True,
             max_length=self.config.training.max_seq_len,
         ).to(self.device)
 
-        outputs = self.model(**batch_inputs)
-        logits = outputs.logits
-
-        # 5) Entropy bonus
-        entropy_val = self.entropy_bonus.compute(logits)
-
-        # 6) KL penalty
-        kl_penalty = torch.tensor(0.0, device=self.device)
-        kl_raw = torch.tensor(0.0)
+        # Pre-compute coefficients (avoid double-counting from per-chunk calls)
+        entropy_coeff = self.entropy_bonus.get_coeff()
         kl_coeff = 0.0
-        if self.kl_anchor is not None and self.ref_model is not None:
-            with torch.no_grad():
-                ref_outputs = self.ref_model(**batch_inputs)
-                ref_logits = ref_outputs.logits
-            kl_penalty, kl_raw, kl_coeff = self.kl_anchor.compute(
-                logits, ref_logits, batch_inputs.get("attention_mask")
-            )
+        if self.kl_anchor is not None:
+            kl_coeff = self.kl_anchor.get_coeff()
 
-        # 7) Policy gradient loss (simplified GRPO)
-        log_probs = F.log_softmax(logits, dim=-1)
-        # Gather log probs for generated tokens
-        labels = batch_inputs["input_ids"][:, 1:]
-        token_log_probs = torch.gather(
-            log_probs[:, :-1, :], 2, labels.unsqueeze(-1)
-        ).squeeze(-1)
-        mask = batch_inputs.get("attention_mask", torch.ones_like(labels))[:, 1:]
-
-        per_sample_log_prob = (token_log_probs * mask[:, :token_log_probs.shape[1]]).sum(dim=1) / mask[:, :token_log_probs.shape[1]].sum(dim=1).clamp(min=1)
-
-        pg_loss = -(per_sample_log_prob * advantages).mean()
-
-        # 8) Total loss
-        loss = pg_loss - entropy_val + kl_penalty
-
-        # 9) Backward
         self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.max_grad_norm)
+
+        fwd_chunk = 4  # sequences per forward pass chunk
+        n_seqs = len(all_texts)
+        n_chunks = (n_seqs + fwd_chunk - 1) // fwd_chunk
+
+        # Accumulators for metrics (weighted by chunk fraction)
+        agg_pg_loss = 0.0
+        agg_entropy_bonus = 0.0
+        agg_kl_penalty = 0.0
+        agg_kl_raw = 0.0
+        agg_raw_entropy = 0.0
+        agg_te = 0.0  # token entropy metric
+
+        for ci in range(n_chunks):
+            s = ci * fwd_chunk
+            e = min(s + fwd_chunk, n_seqs)
+            chunk_n = e - s
+            w = chunk_n / n_seqs  # weight for gradient scaling
+
+            chunk_inputs = {k: v[s:e] for k, v in batch_inputs.items()}
+            chunk_advs = advantages[s:e]
+
+            # Policy forward (with gradients)
+            outputs = self.model(**chunk_inputs)
+            logits = outputs.logits
+
+            # log_softmax (shared for entropy, KL, and PG loss)
+            log_probs = F.log_softmax(logits, dim=-1)
+
+            # Entropy bonus (manual — avoid entropy_bonus.compute which
+            # would update AdaptiveEntropyBonus state per-chunk)
+            probs = log_probs.exp()
+            raw_entropy = -(probs * log_probs).sum(-1).mean()
+            chunk_entropy_val = entropy_coeff * raw_entropy
+
+            # KL penalty (manual — avoid kl_anchor.compute which
+            # would increment _current_step per-chunk)
+            chunk_kl_pen = torch.tensor(0.0, device=self.device)
+            chunk_kl_raw = 0.0
+            if self.kl_anchor is not None and self.ref_model is not None:
+                with torch.no_grad():
+                    ref_logits = self.ref_model(**chunk_inputs).logits
+                ref_probs = F.softmax(ref_logits, dim=-1)
+                kl = F.kl_div(log_probs, ref_probs, reduction="none").sum(dim=-1)
+                mask_kl = chunk_inputs.get("attention_mask")
+                if mask_kl is not None:
+                    kl_val = (kl * mask_kl).sum() / mask_kl.sum().clamp(min=1)
+                else:
+                    kl_val = kl.mean()
+                chunk_kl_pen = kl_coeff * kl_val
+                chunk_kl_raw = kl_val.detach().item()
+                del ref_logits, ref_probs, kl, kl_val
+
+            # PG loss
+            labels = chunk_inputs["input_ids"][:, 1:]
+            token_log_probs = torch.gather(
+                log_probs[:, :-1, :], 2, labels.unsqueeze(-1)
+            ).squeeze(-1)
+            mask = chunk_inputs.get("attention_mask", torch.ones_like(labels))[:, 1:]
+            per_sample_lp = (
+                (token_log_probs * mask[:, :token_log_probs.shape[1]]).sum(dim=1)
+                / mask[:, :token_log_probs.shape[1]].sum(dim=1).clamp(min=1)
+            )
+            chunk_pg_loss = -(per_sample_lp * chunk_advs).mean()
+
+            # Chunk loss → backward (scaled by fraction for proper averaging)
+            chunk_loss = chunk_pg_loss - chunk_entropy_val + chunk_kl_pen
+            (chunk_loss * w).backward()
+
+            # Accumulate metrics (detached)
+            agg_pg_loss += chunk_pg_loss.item() * w
+            agg_entropy_bonus += chunk_entropy_val.item() * w
+            agg_kl_penalty += chunk_kl_pen.item() * w
+            agg_kl_raw += chunk_kl_raw * w
+            agg_raw_entropy += raw_entropy.item() * w
+
+            # Token entropy metric (detached, for dashboard)
+            agg_te += self.token_entropy.compute(
+                logits.detach(), chunk_inputs.get("attention_mask")
+            ) * w
+
+            # Free GPU memory before next chunk
+            del outputs, logits, log_probs, probs, token_log_probs
+            del chunk_loss, chunk_entropy_val, chunk_kl_pen, chunk_pg_loss
+            del raw_entropy, per_sample_lp
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Gradient clipping & optimizer step
+        torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(), self.config.training.max_grad_norm
+        )
         self.optimizer.step()
 
-        # --- Metrics ---
-        # Token entropy
-        te = self.token_entropy.compute(logits.detach(), batch_inputs.get("attention_mask"))
+        # Update entropy bonus state once per train step (not per chunk)
+        if isinstance(self.entropy_bonus, AdaptiveEntropyBonus):
+            self.entropy_bonus._update_entropy_state(agg_raw_entropy)
+            self.entropy_bonus._step += 1
+
+        # Update KL anchor step counter once per train step
+        if self.kl_anchor is not None:
+            self.kl_anchor._current_step += 1
+
+        # Aggregated scalars for metrics / return dict
+        loss_val = agg_pg_loss - agg_entropy_bonus + agg_kl_penalty
+        pg_loss_val = agg_pg_loss
+        entropy_bonus_val = agg_entropy_bonus
+        kl_penalty_val = agg_kl_penalty
+        kl_raw_val = agg_kl_raw
+        te = agg_te
 
         # Action entropy
         import re
@@ -407,7 +484,7 @@ class GRPOTrainer:
             token_entropy=te,
             action_entropy=ae,
             entropy_coeff=self.entropy_bonus.get_coeff(),
-            kl_div=kl_raw.item(),
+            kl_div=kl_raw_val,
             kl_coeff=kl_coeff,
             calls_per_step=sum(1 for a in actions if a != "no_action") / len(prompts),
             tool_frequencies=tool_freqs,
@@ -450,15 +527,15 @@ class GRPOTrainer:
                 idx += 1
 
         return {
-            "loss": loss.item(),
-            "pg_loss": pg_loss.item(),
-            "entropy_bonus": entropy_val.item(),
-            "kl_penalty": kl_penalty.item(),
+            "loss": loss_val,
+            "pg_loss": pg_loss_val,
+            "entropy_bonus": entropy_bonus_val,
+            "kl_penalty": kl_penalty_val,
             "token_entropy": te,
             "action_entropy": ae,
             "entropy_coeff": self.entropy_bonus.get_coeff(),
             "kl_coeff": kl_coeff,
-            "kl_raw": kl_raw.item(),
+            "kl_raw": kl_raw_val,
             "self_bleu": sb,
             "uniqueness": tu,
             "pattern_repetition": pr,

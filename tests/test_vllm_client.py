@@ -180,7 +180,7 @@ class TestVLLMConfig:
         assert cfg.enabled is True
         assert cfg.base_url == "http://localhost:8000"
         assert cfg.tensor_parallel_size == 1
-        assert cfg.gpu_memory_utilization == 0.45
+        assert cfg.gpu_memory_utilization == 0.30
         assert cfg.max_model_len == 4096
         assert cfg.launch_server is True
         assert cfg.enforce_eager is True
