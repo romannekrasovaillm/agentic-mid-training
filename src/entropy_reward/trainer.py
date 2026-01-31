@@ -241,13 +241,24 @@ class GRPOTrainer:
         group_size = self.config.training.group_size
 
         # 1) Generate group_size completions per prompt
+        total_gen = len(prompts) * group_size
         all_texts = []
         all_acc = []
+        gen_idx = 0
+        t_gen_start = time.time()
         for prompt, acc in zip(prompts, accuracy_scores):
             for _ in range(group_size):
                 text = self._generate(prompt)
                 all_texts.append(text)
                 all_acc.append(acc)
+                gen_idx += 1
+                if gen_idx % 8 == 0 or gen_idx == total_gen:
+                    elapsed = time.time() - t_gen_start
+                    logger.info(
+                        f"    [gen {gen_idx}/{total_gen}] "
+                        f"{elapsed:.1f}s  "
+                        f"({elapsed/gen_idx:.2f}s/rollout)"
+                    )
 
         # 2) Compute decomposed rewards
         rewards_list = self.reward_fn.compute_batch(all_texts, all_acc)

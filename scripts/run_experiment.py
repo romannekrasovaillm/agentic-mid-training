@@ -285,12 +285,22 @@ def main():
         "calls_per_step",
     ]
     _interval_metrics: dict[str, list[float]] = {k: [] for k in _AGG_KEYS}
+    _step_start = _time.time()
 
     for step in range(1, total_steps + 1):
+        _step_start = _time.time()
+
         # Sample batch from Nemotron data
         indices = torch.randint(0, len(train_samples), (batch_size,))
         batch_samples = [train_samples[i] for i in indices]
         batch_prompts = [s.prompt for s in batch_samples]
+
+        if step == 1:
+            log.info(
+                f"  Step 1: generating {batch_size}×{config.training.group_size}="
+                f"{batch_size * config.training.group_size} rollouts "
+                f"(up to {config.model.generation.max_new_tokens} tok each)…"
+            )
 
         # Accuracy will be computed after generation inside trainer,
         # for now pass 0 (trainer.train_step handles R_acc externally)
@@ -299,10 +309,22 @@ def main():
         # Train step
         metrics = trainer.train_step(batch_prompts, batch_acc, step)
 
+        step_time = _time.time() - _step_start
+
         # Accumulate metrics for averaging
         for k in _AGG_KEYS:
             if k in metrics:
                 _interval_metrics[k].append(metrics[k])
+
+        # Short per-step progress (every step when not at dashboard interval)
+        if step % log_interval != 0:
+            if step <= 3 or step % 10 == 0:
+                log.info(
+                    f"  step {step}/{total_steps}  "
+                    f"{step_time:.1f}s/step  "
+                    f"loss={metrics['loss']:.4f}  "
+                    f"R={metrics['r_total']:.3f}"
+                )
 
         # Verbose log every log_interval steps
         if step % log_interval == 0:
