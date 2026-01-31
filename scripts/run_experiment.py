@@ -227,6 +227,7 @@ def _setup_vllm_client(config: ExperimentConfig):
         timeout=vcfg.request_timeout,
         max_retries=vcfg.max_retries,
         use_chat_api=config.model.use_chat_template,
+        max_model_len=vcfg.max_model_len,
     )
 
     log.info(f"Waiting for vLLM server at {vcfg.base_url}...")

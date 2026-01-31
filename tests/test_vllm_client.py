@@ -28,6 +28,7 @@ class TestVLLMClientInit:
         assert client.top_p == 0.9
         assert client.use_chat_api is True
         assert client.max_retries == 3
+        assert client.max_model_len == 8192
 
     def test_custom_params(self):
         client = VLLMClient(
@@ -181,7 +182,7 @@ class TestVLLMConfig:
         assert cfg.base_url == "http://localhost:8000"
         assert cfg.tensor_parallel_size == 1
         assert cfg.gpu_memory_utilization == 0.30
-        assert cfg.max_model_len == 4096
+        assert cfg.max_model_len == 8192
         assert cfg.launch_server is True
         assert cfg.enforce_eager is True
 

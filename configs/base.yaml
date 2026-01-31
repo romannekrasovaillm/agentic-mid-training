@@ -96,7 +96,7 @@ vllm:
   base_url: "http://localhost:8000"
   tensor_parallel_size: 1  # H200 single GPU is enough for 10B MoE
   gpu_memory_utilization: 0.30  # leave room for HF policy + ref models
-  max_model_len: 4096
+  max_model_len: 8192
   enforce_eager: true  # avoid torch.compile issues with MoE FP8
   launch_server: true  # auto-start vLLM from run_experiment.py
   server_timeout: 300.0

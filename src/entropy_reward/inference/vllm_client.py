@@ -31,6 +31,7 @@ class VLLMClient:
         timeout: float = 300.0,
         max_retries: int = 3,
         use_chat_api: bool = True,
+        max_model_len: int = 8192,
     ):
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
@@ -40,6 +41,7 @@ class VLLMClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.use_chat_api = use_chat_api
+        self.max_model_len = max_model_len
         self._session: aiohttp.ClientSession | None = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -94,22 +96,51 @@ class VLLMClient:
 
     # ── Single completion ─────────────────────────────────────────
 
+    def _parse_input_tokens(self, error_body: str) -> int | None:
+        """Extract input_tokens count from vLLM context-length error."""
+        import re
+        m = re.search(r"has (\d+) input tokens", error_body)
+        return int(m.group(1)) if m else None
+
     async def _generate_one_chat(self, prompt: str) -> str:
         """Generate via /v1/chat/completions endpoint."""
         session = await self._get_session()
-        payload = {
-            "model": self.model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": self.max_new_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-        }
+        max_tok = self.max_new_tokens
         for attempt in range(self.max_retries):
+            payload = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tok,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+            }
             try:
                 async with session.post(
                     f"{self.base_url}/v1/chat/completions",
                     json=payload,
                 ) as resp:
+                    if resp.status == 400:
+                        body = await resp.text()
+                        input_tok = self._parse_input_tokens(body)
+                        if input_tok is not None:
+                            available = self.max_model_len - input_tok
+                            if available >= 64:
+                                max_tok = available
+                                logger.info(
+                                    f"Prompt has {input_tok} tokens, "
+                                    f"capping max_tokens to {max_tok}"
+                                )
+                                continue
+                            else:
+                                logger.warning(
+                                    f"Prompt too long ({input_tok} tokens), "
+                                    f"only {available} left — skipping"
+                                )
+                                return ""
+                        logger.warning(
+                            f"vLLM chat error (400): {body[:300]}"
+                        )
+                        continue
                     if resp.status != 200:
                         body = await resp.text()
                         logger.warning(
@@ -129,19 +160,42 @@ class VLLMClient:
     async def _generate_one_completion(self, prompt: str) -> str:
         """Generate via /v1/completions endpoint (raw text)."""
         session = await self._get_session()
-        payload = {
-            "model": self.model_name,
-            "prompt": prompt,
-            "max_tokens": self.max_new_tokens,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-        }
+        max_tok = self.max_new_tokens
         for attempt in range(self.max_retries):
+            payload = {
+                "model": self.model_name,
+                "prompt": prompt,
+                "max_tokens": max_tok,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+            }
             try:
                 async with session.post(
                     f"{self.base_url}/v1/completions",
                     json=payload,
                 ) as resp:
+                    if resp.status == 400:
+                        body = await resp.text()
+                        input_tok = self._parse_input_tokens(body)
+                        if input_tok is not None:
+                            available = self.max_model_len - input_tok
+                            if available >= 64:
+                                max_tok = available
+                                logger.info(
+                                    f"Prompt has {input_tok} tokens, "
+                                    f"capping max_tokens to {max_tok}"
+                                )
+                                continue
+                            else:
+                                logger.warning(
+                                    f"Prompt too long ({input_tok} tokens), "
+                                    f"only {available} left — skipping"
+                                )
+                                return ""
+                        logger.warning(
+                            f"vLLM completion error (400): {body[:300]}"
+                        )
+                        continue
                     if resp.status != 200:
                         body = await resp.text()
                         logger.warning(
