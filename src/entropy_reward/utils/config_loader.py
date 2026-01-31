@@ -87,8 +87,8 @@ class RewardConfig:
 
 @dataclass
 class MetricsConfig:
-    log_interval: int = 10
-    eval_interval: int = 100
+    log_interval: int = 50
+    eval_interval: int = 200
     self_bleu_n: int = 4
     self_bleu_sample_size: int = 100
     pattern_window: int = 50
@@ -122,11 +122,12 @@ class StopConfig:
 @dataclass
 class TrainingConfig:
     learning_rate: float = 5e-6
-    batch_size: int = 4
+    batch_size: int = 8
     group_size: int = 4  # GRPO group size
     max_steps: int = 5000
     max_seq_len: int = 4096
-    gradient_accumulation_steps: int = 8
+    gradient_accumulation_steps: int = 4
+    gradient_checkpointing: bool = True
     warmup_ratio: float = 0.05
     max_grad_norm: float = 1.0
     weight_decay: float = 0.01
