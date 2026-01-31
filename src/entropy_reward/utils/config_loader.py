@@ -136,7 +136,7 @@ class VLLMConfig:
 @dataclass
 class TrainingConfig:
     learning_rate: float = 5e-6
-    batch_size: int = 8
+    batch_size: int = 6
     group_size: int = 4  # GRPO group size
     max_steps: int = 5000
     max_seq_len: int = 4096
