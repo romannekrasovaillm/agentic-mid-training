@@ -153,6 +153,7 @@ class GRPOTrainer:
         self.ref_model = None
         self.optimizer = None
         self.tokenizer = None
+        self.vllm_client = None  # Optional VLLMClient for fast batched generation
 
     def setup_model(self, model, ref_model, tokenizer, optimizer):
         """Set model, reference model, tokenizer, optimizer."""
@@ -160,6 +161,15 @@ class GRPOTrainer:
         self.ref_model = ref_model
         self.tokenizer = tokenizer
         self.optimizer = optimizer
+
+    def set_vllm_client(self, client):
+        """Attach a VLLMClient for fast batched rollout generation.
+
+        When set, train_step() will use the vLLM server for generation
+        instead of sequential HF model.generate() calls.
+        """
+        self.vllm_client = client
+        logger.info("vLLM client attached — generation will use vLLM server")
 
         # Wire up eval harness generation
         def generate_fn(prompt: str, tools: list[str] | None) -> str:
@@ -242,23 +252,45 @@ class GRPOTrainer:
 
         # 1) Generate group_size completions per prompt
         total_gen = len(prompts) * group_size
-        all_texts = []
-        all_acc = []
-        gen_idx = 0
         t_gen_start = time.time()
-        for prompt, acc in zip(prompts, accuracy_scores):
-            for _ in range(group_size):
-                text = self._generate(prompt)
-                all_texts.append(text)
-                all_acc.append(acc)
-                gen_idx += 1
-                if gen_idx % 8 == 0 or gen_idx == total_gen:
-                    elapsed = time.time() - t_gen_start
-                    logger.info(
-                        f"    [gen {gen_idx}/{total_gen}] "
-                        f"{elapsed:.1f}s  "
-                        f"({elapsed/gen_idx:.2f}s/rollout)"
-                    )
+
+        if self.vllm_client is not None:
+            # ── Fast path: batched generation via vLLM server ──
+            # Expand prompts: each prompt repeated group_size times
+            expanded_prompts = []
+            all_acc = []
+            for prompt, acc in zip(prompts, accuracy_scores):
+                for _ in range(group_size):
+                    expanded_prompts.append(prompt)
+                    all_acc.append(acc)
+
+            logger.info(
+                f"    [vLLM] Sending {total_gen} prompts for batched generation..."
+            )
+            all_texts = self.vllm_client.generate_batch(expanded_prompts)
+            elapsed = time.time() - t_gen_start
+            logger.info(
+                f"    [vLLM] {total_gen} rollouts in {elapsed:.1f}s "
+                f"({elapsed / max(total_gen, 1):.2f}s/rollout)"
+            )
+        else:
+            # ── Slow path: sequential HF generation ──
+            all_texts = []
+            all_acc = []
+            gen_idx = 0
+            for prompt, acc in zip(prompts, accuracy_scores):
+                for _ in range(group_size):
+                    text = self._generate(prompt)
+                    all_texts.append(text)
+                    all_acc.append(acc)
+                    gen_idx += 1
+                    if gen_idx % 8 == 0 or gen_idx == total_gen:
+                        elapsed = time.time() - t_gen_start
+                        logger.info(
+                            f"    [gen {gen_idx}/{total_gen}] "
+                            f"{elapsed:.1f}s  "
+                            f"({elapsed/gen_idx:.2f}s/rollout)"
+                        )
 
         # 2) Compute decomposed rewards
         rewards_list = self.reward_fn.compute_batch(all_texts, all_acc)

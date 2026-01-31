@@ -154,6 +154,83 @@ def load_model_and_tokenizer(config: ExperimentConfig):
     return model, ref_model, tokenizer
 
 
+def _maybe_launch_vllm_server(config: ExperimentConfig) -> "subprocess.Popen | None":
+    """Optionally launch vLLM server as a subprocess.
+
+    Returns the Popen handle (or None if not launched).
+    """
+    vcfg = config.vllm
+    if not vcfg.enabled or not vcfg.launch_server:
+        return None
+
+    import subprocess
+    import shutil
+
+    log = logging.getLogger("experiment")
+
+    script = Path(__file__).resolve().parent / "start_vllm_server.sh"
+    if not script.exists():
+        log.error(f"vLLM launch script not found: {script}")
+        return None
+
+    # Parse port from base_url
+    from urllib.parse import urlparse
+    parsed = urlparse(vcfg.base_url)
+    port = str(parsed.port or 8000)
+
+    env = {
+        **dict(__import__("os").environ),
+        "MODEL": config.model.name,
+        "PORT": port,
+        "TP": str(vcfg.tensor_parallel_size),
+        "GPU_MEMORY_UTIL": str(vcfg.gpu_memory_utilization),
+        "MAX_MODEL_LEN": str(vcfg.max_model_len),
+        "DTYPE": config.model.torch_dtype,
+        "ENFORCE_EAGER": "1" if vcfg.enforce_eager else "0",
+    }
+
+    log.info(f"Launching vLLM server (port={port}, tp={vcfg.tensor_parallel_size}, "
+             f"gpu_util={vcfg.gpu_memory_utilization})...")
+    proc = subprocess.Popen(
+        ["bash", str(script)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    log.info(f"vLLM server PID: {proc.pid}")
+    return proc
+
+
+def _setup_vllm_client(config: ExperimentConfig):
+    """Create and connect a VLLMClient if vLLM is enabled."""
+    vcfg = config.vllm
+    if not vcfg.enabled:
+        return None
+
+    log = logging.getLogger("experiment")
+
+    from entropy_reward.inference import VLLMClient
+
+    client = VLLMClient(
+        base_url=vcfg.base_url,
+        model_name=config.model.name,
+        max_new_tokens=config.model.generation.max_new_tokens,
+        temperature=config.model.generation.temperature,
+        top_p=config.model.generation.top_p,
+        timeout=vcfg.request_timeout,
+        max_retries=vcfg.max_retries,
+        use_chat_api=config.model.use_chat_template,
+    )
+
+    log.info(f"Waiting for vLLM server at {vcfg.base_url}...")
+    if client.wait_until_ready(timeout=vcfg.server_timeout):
+        log.info("vLLM client connected")
+        return client
+    else:
+        log.warning("vLLM server not reachable — falling back to HF generation")
+        return None
+
+
 def _gpu_mem_str() -> str:
     """Return compact GPU memory usage string."""
     if not torch.cuda.is_available():
@@ -236,6 +313,12 @@ def main():
     trainer.reward_fn.available_tools = sorted(all_tool_names)
     trainer.setup_model(model, ref_model, tokenizer, optimizer)
 
+    # --- vLLM server (optional) ---
+    vllm_proc = _maybe_launch_vllm_server(config)
+    vllm_client = _setup_vllm_client(config)
+    if vllm_client is not None:
+        trainer.set_vllm_client(vllm_client)
+
     # Init wandb
     if config.training.wandb_project:
         trainer.reward_logger.init_wandb(
@@ -271,6 +354,10 @@ def main():
     log.info(f"  Reward format mode:     {config.reward.format_mode}")
     log.info(f"  Baseline:               {config.reward.baseline}")
     log.info(f"  KL schedule:            {config.kl.schedule} ({config.kl.initial_coeff} -> {config.kl.final_coeff})")
+    if vllm_client is not None:
+        log.info(f"  vLLM:                   ENABLED ({config.vllm.base_url})")
+    else:
+        log.info(f"  vLLM:                   disabled (sequential HF generation)")
     if torch.cuda.is_available():
         log.info(f"  GPU memory (pre-train): {_gpu_mem_str()}")
     log.info("=" * 72)
@@ -486,6 +573,26 @@ def main():
     total_time = _time.time() - _train_start
     trainer.save_checkpoint(step)
     trainer.close()
+
+    # Cleanup vLLM
+    if vllm_client is not None:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            loop.run_until_complete(vllm_client.close())
+        except Exception:
+            pass
+    if vllm_proc is not None:
+        log.info("Terminating vLLM server...")
+        vllm_proc.terminate()
+        try:
+            vllm_proc.wait(timeout=10)
+        except Exception:
+            vllm_proc.kill()
+
     log.info("")
     log.info("=" * 72)
     log.info(f"  TRAINING COMPLETE — {step} steps in {total_time:.0f}s ({total_time/60:.1f}min)")

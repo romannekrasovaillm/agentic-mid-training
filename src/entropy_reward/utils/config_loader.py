@@ -120,6 +120,20 @@ class StopConfig:
 
 
 @dataclass
+class VLLMConfig:
+    enabled: bool = False
+    base_url: str = "http://localhost:8000"
+    tensor_parallel_size: int = 1
+    gpu_memory_utilization: float = 0.45
+    max_model_len: int = 4096
+    enforce_eager: bool = False
+    launch_server: bool = False  # auto-launch vLLM server from run_experiment
+    server_timeout: float = 300.0  # seconds to wait for server readiness
+    max_retries: int = 3
+    request_timeout: float = 300.0
+
+
+@dataclass
 class TrainingConfig:
     learning_rate: float = 5e-6
     batch_size: int = 8
@@ -153,6 +167,7 @@ class ExperimentConfig:
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     stop: StopConfig = field(default_factory=StopConfig)
+    vllm: VLLMConfig = field(default_factory=VLLMConfig)
 
 
 def _merge_dict(base: dict, override: dict) -> dict:

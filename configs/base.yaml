@@ -88,3 +88,17 @@ stop:
   hacking_eval_interval: 200
   advantage_drift_threshold: 2.0
   advantage_drift_window: 100
+
+# vLLM server for fast batched generation (rollouts).
+# HF model is still used for forward-pass logits (GRPO loss) and KL.
+vllm:
+  enabled: false  # set true to use vLLM for generation
+  base_url: "http://localhost:8000"
+  tensor_parallel_size: 1  # H200 single GPU is enough for 10B MoE
+  gpu_memory_utilization: 0.45  # leave room for HF policy + ref models
+  max_model_len: 4096
+  enforce_eager: false
+  launch_server: false  # auto-start vLLM from run_experiment.py
+  server_timeout: 300.0
+  max_retries: 3
+  request_timeout: 300.0
