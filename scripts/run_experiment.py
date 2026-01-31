@@ -50,25 +50,23 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_dataset_placeholder() -> tuple[list[str], list[float], list[str]]:
-    """Placeholder dataset loader. Replace with actual data loading.
+def load_nemotron_data(config: ExperimentConfig):
+    """Load nvidia/Nemotron-Agentic-v1 dataset.
 
     Returns:
-        (train_prompts, train_accuracy_scores, eval_prompts)
+        (train_samples, eval_samples) — lists of AgenticSample
     """
-    train_prompts = [
-        "Solve: What is 15 * 23? Use the calculate tool to find the answer.",
-        "Search for the capital of France and provide the answer.",
-        "Write a Python function to check if a number is prime.",
-        "Analyze the sentiment of: 'This product is amazing and worth every penny'",
-        "Calculate the area of a circle with radius 7. Show your work.",
-        "Find information about the tallest building in the world.",
-        "Explain the difference between a stack and a queue data structure.",
-        "What is the square root of 144? Use tools to verify.",
-    ]
-    train_acc = [0.0] * len(train_prompts)  # to be filled by actual accuracy checker
-    eval_prompts = train_prompts[:4]  # subset for eval
-    return train_prompts, train_acc, eval_prompts
+    from entropy_reward.data import load_nemotron_splits
+
+    dcfg = config.dataset
+    train_samples, eval_samples = load_nemotron_splits(
+        max_train=dcfg.max_train_samples,
+        max_eval=dcfg.max_eval_samples,
+        multiturn=dcfg.multiturn,
+        seed=config.training.seed,
+        cache_dir=dcfg.cache_dir or None,
+    )
+    return train_samples, eval_samples
 
 
 def load_model_and_tokenizer(config: ExperimentConfig):
@@ -163,6 +161,9 @@ def main():
         print(f"  dtype:  {config.model.torch_dtype}")
         print(f"  attn:   {config.model.attn_implementation}")
         print(f"  chat:   {config.model.use_chat_template}")
+        print(f"Dataset:  {config.dataset.name}")
+        print(f"  train:  {config.dataset.train_split}")
+        print(f"  eval:   {config.dataset.eval_split}")
         print(f"Entropy:  {config.entropy.strategy}")
         print(f"KL:       {config.kl.schedule} ({config.kl.initial_coeff} -> {config.kl.final_coeff})")
         print(f"Reward:   format={config.reward.format_mode}, baseline={config.reward.baseline}")
@@ -170,6 +171,17 @@ def main():
         print(f"Seq len:  {config.training.max_seq_len}")
         print(f"Batch:    {config.training.batch_size} x {config.training.gradient_accumulation_steps} accum")
         return
+
+    # Load dataset (nvidia/Nemotron-Agentic-v1)
+    log.info(f"Loading dataset: {config.dataset.name}")
+    train_samples, eval_samples = load_nemotron_data(config)
+    log.info(f"Train: {len(train_samples)} samples, Eval: {len(eval_samples)} samples")
+
+    # Collect unique tool names across all training samples
+    all_tool_names = set()
+    for s in train_samples:
+        all_tool_names.update(s.tool_names)
+    log.info(f"Unique tools in training data: {len(all_tool_names)} — {sorted(all_tool_names)[:20]}...")
 
     # Load model & tokenizer
     model, ref_model, tokenizer = load_model_and_tokenizer(config)
@@ -180,8 +192,9 @@ def main():
         weight_decay=config.training.weight_decay,
     )
 
-    # Create trainer
+    # Create trainer — pass available tools for reward scoring
     trainer = GRPOTrainer(config)
+    trainer.reward_fn.available_tools = sorted(all_tool_names)
     trainer.setup_model(model, ref_model, tokenizer, optimizer)
 
     # Init wandb
@@ -192,18 +205,22 @@ def main():
             config=asdict(config),
         )
 
-    # Load data
-    train_prompts, train_acc, eval_prompts = load_dataset_placeholder()
+    # Accuracy scorer
+    from entropy_reward.data.accuracy import compute_accuracy
 
     # Training loop
     log.info(f"Starting training for {config.training.max_steps} steps")
     batch_size = config.training.batch_size
 
     for step in range(1, config.training.max_steps + 1):
-        # Sample batch
-        indices = torch.randint(0, len(train_prompts), (batch_size,))
-        batch_prompts = [train_prompts[i] for i in indices]
-        batch_acc = [train_acc[i] for i in indices]
+        # Sample batch from Nemotron data
+        indices = torch.randint(0, len(train_samples), (batch_size,))
+        batch_samples = [train_samples[i] for i in indices]
+        batch_prompts = [s.prompt for s in batch_samples]
+
+        # Accuracy will be computed after generation inside trainer,
+        # for now pass 0 (trainer.train_step handles R_acc externally)
+        batch_acc = [0.0] * batch_size
 
         # Train step
         metrics = trainer.train_step(batch_prompts, batch_acc, step)
@@ -222,6 +239,7 @@ def main():
 
         # Eval
         if step % config.metrics.eval_interval == 0:
+            eval_prompts = [s.prompt for s in eval_samples[:50]]
             eval_results = trainer.run_eval(eval_prompts, step)
             log.info(f"[Step {step}] Eval: {eval_results}")
 

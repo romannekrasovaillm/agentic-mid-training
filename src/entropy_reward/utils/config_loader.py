@@ -32,6 +32,20 @@ class ModelConfig:
 
 
 @dataclass
+class DatasetConfig:
+    name: str = "nvidia/Nemotron-Agentic-v1"
+    train_split: str = "tool_calling"
+    eval_split: str = "interactive_agent"
+    max_train_samples: int = 0  # 0 = all
+    max_eval_samples: int = 200
+    multiturn: bool = False
+    max_context_turns: int = 3
+    accuracy_tool_weight: float = 0.6
+    accuracy_response_weight: float = 0.4
+    cache_dir: str = ""
+
+
+@dataclass
 class EntropyConfig:
     strategy: str = "constant"  # "constant" | "adaptive"
     constant_bonus: float = 0.01
@@ -130,6 +144,7 @@ class ExperimentConfig:
     name: str = "default"
     description: str = ""
     model: ModelConfig = field(default_factory=ModelConfig)
+    dataset: DatasetConfig = field(default_factory=DatasetConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     entropy: EntropyConfig = field(default_factory=EntropyConfig)
     kl: KLConfig = field(default_factory=KLConfig)

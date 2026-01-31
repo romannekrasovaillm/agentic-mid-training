@@ -16,6 +16,17 @@ model:
     top_p: 0.9
     do_sample: true
 
+dataset:
+  name: "nvidia/Nemotron-Agentic-v1"
+  train_split: "tool_calling"
+  eval_split: "interactive_agent"
+  max_train_samples: 0  # 0 = use all
+  max_eval_samples: 200
+  multiturn: false
+  max_context_turns: 3
+  accuracy_tool_weight: 0.6
+  accuracy_response_weight: 0.4
+
 training:
   learning_rate: 5.0e-6
   batch_size: 4
