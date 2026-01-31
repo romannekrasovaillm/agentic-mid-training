@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -19,6 +19,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# Flash Attention 2 (for GigaChat3 MLA acceleration)
+RUN pip install --no-cache-dir flash-attn --no-build-isolation 2>/dev/null || \
+    echo "flash-attn build failed — will fall back to sdpa attention"
+
 # Project source
 COPY pyproject.toml .
 COPY src/ src/
@@ -34,6 +38,11 @@ RUN mkdir -p outputs logs
 
 # NLTK data (needed for some metrics)
 RUN python -c "import nltk; nltk.download('punkt', quiet=True)" 2>/dev/null || true
+
+# Pre-download GigaChat3 model (optional — comment out to download at runtime)
+# RUN python -c "from transformers import AutoTokenizer, AutoModelForCausalLM; \
+#     AutoTokenizer.from_pretrained('ai-sage/GigaChat3-10B-A1.8B', trust_remote_code=True); \
+#     AutoModelForCausalLM.from_pretrained('ai-sage/GigaChat3-10B-A1.8B', trust_remote_code=True)"
 
 ENTRYPOINT ["python", "scripts/run_experiment.py"]
 CMD ["--config", "configs/base.yaml"]

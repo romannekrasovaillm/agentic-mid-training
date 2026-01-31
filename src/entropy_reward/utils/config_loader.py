@@ -11,6 +11,27 @@ import yaml
 
 
 @dataclass
+class GenerationConfig:
+    max_new_tokens: int = 512
+    temperature: float = 0.7
+    top_p: float = 0.9
+    do_sample: bool = True
+
+
+@dataclass
+class ModelConfig:
+    name: str = "ai-sage/GigaChat3-10B-A1.8B"
+    ref_model_name: str = ""  # if empty, use name
+    torch_dtype: str = "bfloat16"  # "bfloat16" | "float16" | "float32"
+    attn_implementation: str = "flash_attention_2"  # "eager" | "sdpa" | "flash_attention_2"
+    trust_remote_code: bool = True
+    device_map: str = "auto"
+    max_memory: dict[str, str] = field(default_factory=dict)
+    use_chat_template: bool = True
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
+
+
+@dataclass
 class EntropyConfig:
     strategy: str = "constant"  # "constant" | "adaptive"
     constant_bonus: float = 0.01
@@ -86,27 +107,29 @@ class StopConfig:
 
 @dataclass
 class TrainingConfig:
-    model_name: str = "meta-llama/Llama-3.1-8B-Instruct"
-    ref_model_name: str = ""  # if empty, use model_name
-    learning_rate: float = 1e-5
-    batch_size: int = 8
+    learning_rate: float = 5e-6
+    batch_size: int = 4
     group_size: int = 4  # GRPO group size
     max_steps: int = 5000
-    max_seq_len: int = 2048
-    gradient_accumulation_steps: int = 4
+    max_seq_len: int = 4096
+    gradient_accumulation_steps: int = 8
     warmup_ratio: float = 0.05
+    max_grad_norm: float = 1.0
+    weight_decay: float = 0.01
     seed: int = 42
     fp16: bool = False
     bf16: bool = True
     output_dir: str = "outputs"
     wandb_project: str = "entropy-reward-experiments"
     wandb_run_name: str = ""
+    checkpoint_interval: int = 500
 
 
 @dataclass
 class ExperimentConfig:
     name: str = "default"
     description: str = ""
+    model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     entropy: EntropyConfig = field(default_factory=EntropyConfig)
     kl: KLConfig = field(default_factory=KLConfig)

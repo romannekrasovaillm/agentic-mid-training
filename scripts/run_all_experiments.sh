@@ -23,8 +23,11 @@ EXPERIMENTS=(
     "full_recipe.yaml"
 )
 
+mkdir -p "$PROJECT_DIR/outputs"
+
 echo "========================================"
 echo " Entropy-Reward Experiments Suite"
+echo " Model: ai-sage/GigaChat3-10B-A1.8B"
 echo " $(date)"
 echo "========================================"
 echo ""

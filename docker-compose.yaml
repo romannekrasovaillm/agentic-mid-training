@@ -1,5 +1,13 @@
 version: "3.8"
 
+# =============================================================================
+# Entropy-Reward Experiments — GigaChat3-10B-A1.8B (MoE, 10B total / 1.8B active)
+#
+# Model: ai-sage/GigaChat3-10B-A1.8B
+# VRAM requirement: ~12 GB (bf16, 1.8B active params)
+# License: MIT
+# =============================================================================
+
 x-common: &common
   build: .
   volumes:
@@ -19,7 +27,7 @@ x-common: &common
             capabilities: [gpu]
 
 services:
-  # --- Individual experiments ---
+  # --- Individual experiments (GRPO training with GigaChat3) ---
   base:
     <<: *common
     container_name: exp-base
@@ -49,6 +57,31 @@ services:
     <<: *common
     container_name: exp-full-recipe
     command: ["--config", "configs/full_recipe.yaml"]
+
+  # --- vLLM inference server (for fast generation with MTP speculative decoding) ---
+  vllm-server:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-gigachat3
+    ports:
+      - "8000:8000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - VLLM_USE_DEEP_GEMM=0
+    command: >
+      --model ai-sage/GigaChat3-10B-A1.8B
+      --dtype auto
+      --trust-remote-code
+      --max-model-len 4096
+      --speculative-config '{"method": "mtp", "num_speculative_tokens": 1}'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   # --- Utilities ---
   test:

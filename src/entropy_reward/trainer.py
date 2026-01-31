@@ -44,7 +44,7 @@ from entropy_reward.monitoring import (
     StopConditionAggregator,
 )
 from entropy_reward.utils.logging_utils import RewardLogger, StepLog
-from entropy_reward.utils.config_loader import ExperimentConfig
+from entropy_reward.utils.config_loader import ExperimentConfig, ModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -161,20 +161,36 @@ class GRPOTrainer:
             self.redteam.set_reward_fn(lambda text: self.reward_fn.compute(text).r_total)
 
     def _generate(self, prompt: str) -> str:
-        """Generate text from current policy."""
+        """Generate text from current policy using chat template if available."""
         if self.model is None or self.tokenizer is None:
             return ""
-        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True,
-                                max_length=self.config.training.max_seq_len).to(self.device)
+
+        gen_cfg = self.config.model.generation
+
+        # Use chat template for chat models (GigaChat3 etc.)
+        if self.config.model.use_chat_template and hasattr(self.tokenizer, "apply_chat_template"):
+            messages = [{"role": "user", "content": prompt}]
+            input_ids = self.tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, return_tensors="pt"
+            ).to(self.device)
+            prompt_len = input_ids.shape[1]
+        else:
+            encoded = self.tokenizer(
+                prompt, return_tensors="pt", truncation=True,
+                max_length=self.config.training.max_seq_len,
+            ).to(self.device)
+            input_ids = encoded["input_ids"]
+            prompt_len = input_ids.shape[1]
+
         with torch.no_grad():
             outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=512,
-                do_sample=True,
-                temperature=0.7,
-                top_p=0.9,
+                input_ids,
+                max_new_tokens=gen_cfg.max_new_tokens,
+                do_sample=gen_cfg.do_sample,
+                temperature=gen_cfg.temperature,
+                top_p=gen_cfg.top_p,
             )
-        return self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+        return self.tokenizer.decode(outputs[0][prompt_len:], skip_special_tokens=False)
 
     def train_step(
         self,
@@ -260,7 +276,7 @@ class GRPOTrainer:
         # 9) Backward
         self.optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.training.max_grad_norm)
         self.optimizer.step()
 
         # --- Metrics ---

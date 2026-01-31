@@ -1,20 +1,37 @@
 name: "base"
-description: "Base configuration — constant entropy bonus, strict format reward"
+description: "Base configuration — constant entropy bonus, strict format reward (GigaChat3 MoE)"
+
+model:
+  name: "ai-sage/GigaChat3-10B-A1.8B"
+  ref_model_name: ""  # if empty, same as model name
+  torch_dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"  # "eager" / "sdpa" if no flash-attn
+  trust_remote_code: true
+  device_map: "auto"
+  max_memory: {}  # e.g. {"0": "20GiB", "cpu": "30GiB"}
+  use_chat_template: true
+  generation:
+    max_new_tokens: 512
+    temperature: 0.7
+    top_p: 0.9
+    do_sample: true
 
 training:
-  model_name: "meta-llama/Llama-3.1-8B-Instruct"
-  learning_rate: 1.0e-5
-  batch_size: 8
+  learning_rate: 5.0e-6
+  batch_size: 4
   group_size: 4
   max_steps: 5000
-  max_seq_len: 2048
-  gradient_accumulation_steps: 4
+  max_seq_len: 4096
+  gradient_accumulation_steps: 8
   warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  weight_decay: 0.01
   seed: 42
   bf16: true
   output_dir: "outputs/base"
   wandb_project: "entropy-reward-experiments"
   wandb_run_name: "base-const-strict"
+  checkpoint_interval: 500
 
 entropy:
   strategy: "constant"

@@ -1,10 +1,16 @@
 name: "full_recipe"
 description: "Full entropy-stability recipe — adaptive entropy + cosine KL + LOO + partial format"
 
+model:
+  generation:
+    max_new_tokens: 768
+    temperature: 0.6
+
 training:
   output_dir: "outputs/full_recipe"
   wandb_run_name: "full-entropy-stability-recipe"
   max_steps: 8000
+  max_seq_len: 4096
 
 entropy:
   strategy: "adaptive"
