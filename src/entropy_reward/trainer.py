@@ -170,9 +170,16 @@ class GRPOTrainer:
         # Use chat template for chat models (GigaChat3 etc.)
         if self.config.model.use_chat_template and hasattr(self.tokenizer, "apply_chat_template"):
             messages = [{"role": "user", "content": prompt}]
-            input_ids = self.tokenizer.apply_chat_template(
+            encoded = self.tokenizer.apply_chat_template(
                 messages, add_generation_prompt=True, return_tensors="pt"
-            ).to(self.device)
+            )
+            # apply_chat_template may return a tensor or a BatchEncoding
+            if hasattr(encoded, "input_ids"):
+                input_ids = encoded["input_ids"].to(self.device)
+            else:
+                input_ids = encoded.to(self.device)
+                if input_ids.dim() == 1:
+                    input_ids = input_ids.unsqueeze(0)
             prompt_len = input_ids.shape[1]
         else:
             encoded = self.tokenizer(
