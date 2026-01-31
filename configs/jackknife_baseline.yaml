@@ -1,0 +1,15 @@
+name: "jackknife_baseline"
+description: "Jackknife baseline with separate baselines for tool/acc (hypothesis C2)"
+
+training:
+  output_dir: "outputs/jackknife_baseline"
+  wandb_run_name: "jackknife-separate-baselines"
+
+entropy:
+  strategy: "adaptive"
+  adaptive_alpha: 0.1
+
+reward:
+  format_mode: "partial"
+  baseline: "jackknife"
+  separate_baselines: true

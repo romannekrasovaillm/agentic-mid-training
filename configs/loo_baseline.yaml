@@ -1,0 +1,15 @@
+name: "loo_baseline"
+description: "Leave-one-out baseline with separate baselines for tool/acc (hypothesis C2)"
+
+training:
+  output_dir: "outputs/loo_baseline"
+  wandb_run_name: "loo-separate-baselines"
+
+entropy:
+  strategy: "adaptive"
+  adaptive_alpha: 0.1
+
+reward:
+  format_mode: "strict"
+  baseline: "leave_one_out"
+  separate_baselines: true

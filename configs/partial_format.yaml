@@ -1,0 +1,18 @@
+name: "partial_format"
+description: "Partial format credit — gradual reward for format compliance instead of binary"
+
+training:
+  output_dir: "outputs/partial_format"
+  wandb_run_name: "partial-format"
+
+entropy:
+  strategy: "constant"
+  constant_bonus: 0.01
+
+reward:
+  format_mode: "partial"
+  format_weight: 1.0
+  partial_tag_credit: 0.3
+  partial_structure_credit: 0.5
+  partial_full_credit: 1.0
+  baseline: "group_norm"

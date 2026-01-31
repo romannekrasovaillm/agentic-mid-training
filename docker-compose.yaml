@@ -1,0 +1,75 @@
+version: "3.8"
+
+x-common: &common
+  build: .
+  volumes:
+    - ./outputs:/app/outputs
+    - ./logs:/app/logs
+    - hf-cache:/root/.cache/huggingface
+  environment:
+    - WANDB_API_KEY=${WANDB_API_KEY:-}
+    - HF_TOKEN=${HF_TOKEN:-}
+    - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  # --- Individual experiments ---
+  base:
+    <<: *common
+    container_name: exp-base
+    command: ["--config", "configs/base.yaml"]
+
+  adaptive-entropy:
+    <<: *common
+    container_name: exp-adaptive-entropy
+    command: ["--config", "configs/adaptive_entropy.yaml", "--base-config", "configs/base.yaml"]
+
+  partial-format:
+    <<: *common
+    container_name: exp-partial-format
+    command: ["--config", "configs/partial_format.yaml", "--base-config", "configs/base.yaml"]
+
+  loo-baseline:
+    <<: *common
+    container_name: exp-loo-baseline
+    command: ["--config", "configs/loo_baseline.yaml", "--base-config", "configs/base.yaml"]
+
+  jackknife-baseline:
+    <<: *common
+    container_name: exp-jackknife-baseline
+    command: ["--config", "configs/jackknife_baseline.yaml", "--base-config", "configs/base.yaml"]
+
+  full-recipe:
+    <<: *common
+    container_name: exp-full-recipe
+    command: ["--config", "configs/full_recipe.yaml"]
+
+  # --- Utilities ---
+  test:
+    <<: *common
+    container_name: exp-tests
+    entrypoint: ["python", "-m", "pytest"]
+    command: ["tests/", "-v", "--tb=short"]
+    deploy:
+      resources:
+        reservations:
+          devices: []
+
+  analyze:
+    <<: *common
+    container_name: exp-analyze
+    entrypoint: ["python", "scripts/analyze_results.py"]
+    command: ["--output-dir", "outputs"]
+    deploy:
+      resources:
+        reservations:
+          devices: []
+
+volumes:
+  hf-cache:
