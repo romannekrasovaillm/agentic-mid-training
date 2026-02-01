@@ -12,7 +12,7 @@ import yaml
 
 @dataclass
 class GenerationConfig:
-    max_new_tokens: int = 512
+    max_new_tokens: int = 1024
     temperature: float = 0.7
     top_p: float = 0.9
     do_sample: bool = True
