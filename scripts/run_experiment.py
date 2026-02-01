@@ -339,9 +339,6 @@ def main():
             config=asdict(config),
         )
 
-    # Accuracy scorer
-    from entropy_reward.data.accuracy import compute_accuracy
-
     # Training loop
     batch_size = config.training.batch_size
     log_interval = config.metrics.log_interval
@@ -392,7 +389,6 @@ def main():
         # Sample batch from Nemotron data
         indices = torch.randint(0, len(train_samples), (batch_size,))
         batch_samples = [train_samples[i] for i in indices]
-        batch_prompts = [s.prompt for s in batch_samples]
 
         if step == 1:
             log.info(
@@ -401,12 +397,8 @@ def main():
                 f"(up to {config.model.generation.max_new_tokens} tok each)…"
             )
 
-        # Accuracy will be computed after generation inside trainer,
-        # for now pass 0 (trainer.train_step handles R_acc externally)
-        batch_acc = [0.0] * batch_size
-
-        # Train step
-        metrics = trainer.train_step(batch_prompts, batch_acc, step)
+        # Train step — R_acc computed per-rollout inside trainer
+        metrics = trainer.train_step(batch_samples, step)
 
         step_time = _time.time() - _step_start
 

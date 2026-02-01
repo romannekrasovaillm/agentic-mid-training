@@ -45,6 +45,8 @@ from entropy_reward.monitoring import (
 )
 from entropy_reward.utils.logging_utils import RewardLogger, StepLog
 from entropy_reward.utils.config_loader import ExperimentConfig, ModelConfig
+from entropy_reward.data import AgenticSample
+from entropy_reward.data.accuracy import compute_accuracy
 
 logger = logging.getLogger(__name__)
 
@@ -236,21 +238,20 @@ class GRPOTrainer:
 
     def train_step(
         self,
-        prompts: list[str],
-        accuracy_scores: list[float],
+        samples: list[AgenticSample],
         step: int,
     ) -> dict[str, Any]:
         """Execute one GRPO training step.
 
         Args:
-            prompts: batch of prompts
-            accuracy_scores: external accuracy signal for each sample
+            samples: batch of AgenticSample (prompt + reference for R_acc)
             step: current global step
 
         Returns:
             dict of metrics for this step
         """
         group_size = self.config.training.group_size
+        prompts = [s.prompt for s in samples]
 
         # 1) Generate group_size completions per prompt
         total_gen = len(prompts) * group_size
@@ -258,13 +259,10 @@ class GRPOTrainer:
 
         if self.vllm_client is not None:
             # ── Fast path: batched generation via vLLM server ──
-            # Expand prompts: each prompt repeated group_size times
             expanded_prompts = []
-            all_acc = []
-            for prompt, acc in zip(prompts, accuracy_scores):
+            for prompt in prompts:
                 for _ in range(group_size):
                     expanded_prompts.append(prompt)
-                    all_acc.append(acc)
 
             logger.info(
                 f"    [vLLM] Sending {total_gen} prompts for batched generation..."
@@ -278,13 +276,11 @@ class GRPOTrainer:
         else:
             # ── Slow path: sequential HF generation ──
             all_texts = []
-            all_acc = []
             gen_idx = 0
-            for prompt, acc in zip(prompts, accuracy_scores):
+            for prompt in prompts:
                 for _ in range(group_size):
                     text = self._generate(prompt)
                     all_texts.append(text)
-                    all_acc.append(acc)
                     gen_idx += 1
                     if gen_idx % 8 == 0 or gen_idx == total_gen:
                         elapsed = time.time() - t_gen_start
@@ -294,6 +290,23 @@ class GRPOTrainer:
                             f"({elapsed/gen_idx:.2f}s/rollout)"
                         )
             gen_elapsed = time.time() - t_gen_start
+
+        # 1b) Compute R_acc per-rollout by comparing to reference
+        acc_tw = self.config.dataset.accuracy_tool_weight
+        acc_rw = self.config.dataset.accuracy_response_weight
+        all_acc = []
+        idx = 0
+        for sample in samples:
+            for _ in range(group_size):
+                result = compute_accuracy(
+                    generated_text=all_texts[idx],
+                    reference_response=sample.reference_response,
+                    reference_tool_calls=sample.reference_tool_calls,
+                    tool_weight=acc_tw,
+                    response_weight=acc_rw,
+                )
+                all_acc.append(result.score)
+                idx += 1
 
         # 2) Compute decomposed rewards + diagnostics
         rewards_list, reward_diags = self.reward_fn.compute_batch_with_diagnosis(
