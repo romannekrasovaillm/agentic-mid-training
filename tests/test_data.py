@@ -87,6 +87,8 @@ class TestBuildPrompt:
         assert "food delivery assistant" in prompt
         assert "[Available Tools]" in prompt
         assert "place_order" in prompt
+        # Tool signatures include parameter types
+        assert "user_id=" in prompt
         assert "[User]" in prompt
         assert "order pizza" in prompt
 

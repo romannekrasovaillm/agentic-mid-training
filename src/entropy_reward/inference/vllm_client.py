@@ -21,16 +21,11 @@ logger = logging.getLogger(__name__)
 class VLLMClient:
     """Client for a running vLLM OpenAI-compatible server."""
 
-    # System message for chat API — tells the model the expected output format.
-    # Without this, the model never learns <think>/<action>/<answer> tags and
-    # GRPO gets R=0.000 on every step.
+    # Short system message — full format instructions are in the prompt text.
+    # This just reinforces the tag structure via the chat template's system role.
     FORMAT_SYSTEM_MSG = (
-        "You are a helpful assistant with access to tools. "
-        "Always structure your response as follows:\n"
-        "1. Wrap reasoning inside <think>...</think> tags.\n"
-        "2. To call a tool: <action>tool_name(arg1=value1, arg2=value2)</action>\n"
-        "3. To answer directly: <answer>your response</answer>\n"
-        "You MUST use <think> tags before every <action> or <answer>."
+        "You are a helpful assistant. Always use <think>, <action>, and "
+        "<answer> XML tags as described in [Response Format]."
     )
 
     def __init__(

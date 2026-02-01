@@ -31,18 +31,16 @@ _SPLIT_FILES = {
 # produces <think>/<action>/<answer> tags by accident.
 FORMAT_INSTRUCTION = (
     "[Response Format]\n"
-    "You must structure your response using these tags:\n"
-    "1. Wrap your reasoning in <think>...</think> tags.\n"
-    "2. If you need to call a tool, use <action>tool_name(arg1=value1, arg2=value2)</action>.\n"
-    "3. If you can answer directly without tools, use <answer>your answer here</answer>.\n"
+    "Always structure your response with these XML tags:\n"
+    "1. <think>your reasoning</think> — REQUIRED before every action or answer.\n"
+    "2. <action>tool_name(arg1=value1, arg2=value2)</action> — to call a tool from the list above.\n"
+    "3. <answer>your final answer</answer> — to respond directly without tools.\n"
     "\n"
-    "Example with tool call:\n"
-    "<think>I need to check the weather for the user.</think>\n"
-    "<action>get_weather(city=\"London\")</action>\n"
-    "\n"
-    "Example with direct answer:\n"
-    "<think>I know the capital of France.</think>\n"
-    "<answer>The capital of France is Paris.</answer>"
+    "Rules:\n"
+    "- You MUST start with <think> tags.\n"
+    "- You MUST use ONLY tools listed in [Available Tools]. Do NOT invent tool names.\n"
+    "- Use exactly one <action> or <answer> after <think>.\n"
+    "- Do NOT output anything outside of these tags."
 )
 
 
@@ -119,14 +117,22 @@ def _build_prompt(messages: list[dict], tools: list[dict]) -> str:
                 parts.append(f"[System]\n{content}")
             break
 
-    # Tool definitions (compact)
+    # Tool definitions with parameter signatures
     if tools:
         tool_descs = []
         for t in tools:
             fn = t.get("function", {})
             name = fn.get("name", "unknown")
             desc = fn.get("description", "")
-            tool_descs.append(f"- {name}: {desc}")
+            params = fn.get("parameters", {}).get("properties", {})
+            if params:
+                sig = ", ".join(
+                    f"{p}={info.get('type', 'str')}"
+                    for p, info in params.items()
+                )
+                tool_descs.append(f"- {name}({sig}): {desc}")
+            else:
+                tool_descs.append(f"- {name}(): {desc}")
         if tool_descs:
             parts.append("[Available Tools]\n" + "\n".join(tool_descs))
 
@@ -156,14 +162,22 @@ def _build_multiturn_prompt(messages: list[dict], tools: list[dict], max_turns: 
                 parts.append(f"[System]\n{content}")
             break
 
-    # Tools
+    # Tools with parameter signatures
     if tools:
         tool_descs = []
         for t in tools:
             fn = t.get("function", {})
             name = fn.get("name", "unknown")
             desc = fn.get("description", "")
-            tool_descs.append(f"- {name}: {desc}")
+            params = fn.get("parameters", {}).get("properties", {})
+            if params:
+                sig = ", ".join(
+                    f"{p}={info.get('type', 'str')}"
+                    for p, info in params.items()
+                )
+                tool_descs.append(f"- {name}({sig}): {desc}")
+            else:
+                tool_descs.append(f"- {name}(): {desc}")
         if tool_descs:
             parts.append("[Available Tools]\n" + "\n".join(tool_descs))
 

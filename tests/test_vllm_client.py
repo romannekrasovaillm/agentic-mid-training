@@ -32,7 +32,6 @@ class TestVLLMClientInit:
         # System message for format guidance is set by default
         assert client.system_message is not None
         assert "<think>" in client.system_message
-        assert "<action>" in client.system_message
 
     def test_custom_system_message(self):
         client = VLLMClient(system_message="Custom system prompt")
