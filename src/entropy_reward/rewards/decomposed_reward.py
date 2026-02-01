@@ -204,6 +204,8 @@ class DecomposedReward:
         partial_structure_credit: float = 0.5,
         partial_full_credit: float = 1.0,
         available_tools: list[str] | None = None,
+        multiplicative_format: bool = False,
+        format_floor: float = 0.1,
     ):
         self.format_mode = format_mode
         self.format_weight = format_weight
@@ -213,6 +215,8 @@ class DecomposedReward:
         self.partial_structure_credit = partial_structure_credit
         self.partial_full_credit = partial_full_credit
         self.available_tools = available_tools
+        self.multiplicative_format = multiplicative_format
+        self.format_floor = format_floor
 
     def compute(
         self,
@@ -247,11 +251,19 @@ class DecomposedReward:
         r_acc = accuracy_score
 
         # Weighted total
-        r_total = (
-            self.format_weight * r_format
-            + self.tool_weight * r_tool
-            + self.accuracy_weight * r_acc
-        )
+        if self.multiplicative_format:
+            # Format acts as a soft gate on tool+acc reward.
+            # At r_fmt=0 the model still gets format_floor fraction of
+            # the base reward, preserving gradient signal for tool learning.
+            base = self.tool_weight * r_tool + self.accuracy_weight * r_acc
+            fmt_multiplier = self.format_floor + (1.0 - self.format_floor) * r_format
+            r_total = fmt_multiplier * base
+        else:
+            r_total = (
+                self.format_weight * r_format
+                + self.tool_weight * r_tool
+                + self.accuracy_weight * r_acc
+            )
 
         return RewardComponents(
             r_format=r_format,

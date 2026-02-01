@@ -59,9 +59,11 @@ kl:
 
 reward:
   format_mode: "strict"
-  format_weight: 1.0
+  format_weight: 1.0       # used only when multiplicative_format: false
   tool_weight: 1.0
   accuracy_weight: 1.0
+  multiplicative_format: true   # format gates tool+acc instead of being additive
+  format_floor: 0.1             # at r_fmt=0 model still gets 10% of base reward
   baseline: "group_norm"
   separate_baselines: false
 

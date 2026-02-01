@@ -224,6 +224,67 @@ class TestGoldenReward:
         assert "reason" in diag  # human-readable reason string
 
 
+class TestMultiplicativeReward:
+    """Tests for multiplicative format gating with floor."""
+
+    GOOD = "<think>reasoning</think>\n<action>get_weather(city=\"London\")</action>"
+    BAD = "Sure! The weather in London is 15°C."
+
+    def test_multiplicative_perfect_format(self):
+        """r_fmt=1 → multiplier=1.0 → full base reward."""
+        reward = DecomposedReward(
+            format_mode="strict", multiplicative_format=True, format_floor=0.1,
+        )
+        result = reward.compute(self.GOOD, accuracy_score=1.0)
+        assert result.r_format == 1.0
+        # multiplier = 0.1 + 0.9 * 1.0 = 1.0
+        # base = 1.0 * 1.0 (tool) + 1.0 * 1.0 (acc) = 2.0
+        assert result.r_total == pytest.approx(2.0)
+
+    def test_multiplicative_zero_format(self):
+        """r_fmt=0 → multiplier=floor → 10% of base reward."""
+        reward = DecomposedReward(
+            format_mode="strict", multiplicative_format=True, format_floor=0.1,
+        )
+        result = reward.compute(self.BAD, accuracy_score=1.0)
+        assert result.r_format == 0.0
+        # multiplier = 0.1 + 0.9 * 0.0 = 0.1
+        # base = 0.0 (tool) + 1.0 (acc) = 1.0
+        assert result.r_total == pytest.approx(0.1)
+
+    def test_multiplicative_preserves_gradient_signal(self):
+        """Even with r_fmt=0, r_total > 0 when base > 0 (gradient signal preserved)."""
+        reward = DecomposedReward(
+            format_mode="strict", multiplicative_format=True, format_floor=0.1,
+        )
+        result = reward.compute(self.BAD, accuracy_score=0.5)
+        assert result.r_total > 0.0, "floor should preserve nonzero reward"
+
+    def test_multiplicative_vs_additive(self):
+        """Multiplicative penalises bad format harder than additive."""
+        mult = DecomposedReward(
+            format_mode="strict", multiplicative_format=True, format_floor=0.1,
+        )
+        add = DecomposedReward(
+            format_mode="strict", multiplicative_format=False,
+        )
+        r_mult = mult.compute(self.BAD, accuracy_score=1.0)
+        r_add = add.compute(self.BAD, accuracy_score=1.0)
+        # Both have r_fmt=0, r_tool=0, r_acc=1.0
+        # Additive: 0 + 0 + 1.0 = 1.0
+        # Multiplicative: 0.1 * (0 + 1.0) = 0.1
+        assert r_mult.r_total < r_add.r_total
+
+    def test_additive_mode_unchanged(self):
+        """multiplicative_format=False keeps the old additive behaviour."""
+        reward = DecomposedReward(
+            format_mode="strict", multiplicative_format=False,
+        )
+        result = reward.compute(self.GOOD, accuracy_score=0.5)
+        # additive: 1.0*1.0 + 1.0*1.0 + 1.0*0.5 = 2.5
+        assert result.r_total == pytest.approx(2.5)
+
+
 class TestBaselines:
     def test_group_norm(self):
         bl = GroupNormBaseline()

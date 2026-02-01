@@ -80,6 +80,9 @@ class RewardConfig:
     partial_tag_credit: float = 0.3
     partial_structure_credit: float = 0.5
     partial_full_credit: float = 1.0
+    # Multiplicative format gating
+    multiplicative_format: bool = True  # format acts as gate on tool+acc
+    format_floor: float = 0.1  # minimum multiplier when r_fmt=0 (keeps gradient signal)
     # Baseline
     baseline: str = "group_norm"  # "group_norm" | "leave_one_out" | "jackknife"
     separate_baselines: bool = False  # separate baselines for tool/acc

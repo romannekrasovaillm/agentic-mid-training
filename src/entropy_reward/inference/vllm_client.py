@@ -76,25 +76,28 @@ class VLLMClient:
         except Exception:
             return False
 
+    def _sync_health_probe(self) -> bool:
+        """Plain-urllib health probe — no asyncio, no aiohttp session reuse issues."""
+        import urllib.request
+        import urllib.error
+        try:
+            req = urllib.request.Request(f"{self.base_url}/health", method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
     def is_healthy(self) -> bool:
-        """Synchronous wrapper for health_check."""
-        return asyncio.get_event_loop().run_until_complete(self.health_check())
+        """Synchronous health check (no asyncio dependency)."""
+        return self._sync_health_probe()
 
     def wait_until_ready(self, timeout: float = 300.0, poll_interval: float = 5.0) -> bool:
         """Block until the vLLM server responds to health checks."""
         start = time.time()
         while time.time() - start < timeout:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_closed():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                ready = loop.run_until_complete(self.health_check())
-                if ready:
-                    logger.info("vLLM server is ready")
-                    return True
-            except Exception:
-                pass
+            if self._sync_health_probe():
+                logger.info("vLLM server is ready")
+                return True
             logger.info(
                 f"Waiting for vLLM server at {self.base_url} "
                 f"({time.time() - start:.0f}s / {timeout:.0f}s)..."

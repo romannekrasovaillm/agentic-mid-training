@@ -101,6 +101,8 @@ class GRPOTrainer:
             partial_tag_credit=config.reward.partial_tag_credit,
             partial_structure_credit=config.reward.partial_structure_credit,
             partial_full_credit=config.reward.partial_full_credit,
+            multiplicative_format=config.reward.multiplicative_format,
+            format_floor=config.reward.format_floor,
         )
 
         # --- Baseline ---
