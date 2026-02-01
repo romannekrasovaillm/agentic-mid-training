@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 class VLLMClient:
     """Client for a running vLLM OpenAI-compatible server."""
 
+    # System message for chat API — tells the model the expected output format.
+    # Without this, the model never learns <think>/<action>/<answer> tags and
+    # GRPO gets R=0.000 on every step.
+    FORMAT_SYSTEM_MSG = (
+        "You are a helpful assistant with access to tools. "
+        "Always structure your response as follows:\n"
+        "1. Wrap reasoning inside <think>...</think> tags.\n"
+        "2. To call a tool: <action>tool_name(arg1=value1, arg2=value2)</action>\n"
+        "3. To answer directly: <answer>your response</answer>\n"
+        "You MUST use <think> tags before every <action> or <answer>."
+    )
+
     def __init__(
         self,
         base_url: str = "http://localhost:8000",
@@ -32,6 +44,7 @@ class VLLMClient:
         max_retries: int = 3,
         use_chat_api: bool = True,
         max_model_len: int = 8192,
+        system_message: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model_name = model_name
@@ -42,6 +55,7 @@ class VLLMClient:
         self.max_retries = max_retries
         self.use_chat_api = use_chat_api
         self.max_model_len = max_model_len
+        self.system_message = system_message if system_message is not None else self.FORMAT_SYSTEM_MSG
         self._session: aiohttp.ClientSession | None = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -106,10 +120,17 @@ class VLLMClient:
         """Generate via /v1/chat/completions endpoint."""
         session = await self._get_session()
         max_tok = self.max_new_tokens
+
+        # Build messages with system prompt for format guidance
+        messages = []
+        if self.system_message:
+            messages.append({"role": "system", "content": self.system_message})
+        messages.append({"role": "user", "content": prompt})
+
         for attempt in range(self.max_retries):
             payload = {
                 "model": self.model_name,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "max_tokens": max_tok,
                 "temperature": self.temperature,
                 "top_p": self.top_p,

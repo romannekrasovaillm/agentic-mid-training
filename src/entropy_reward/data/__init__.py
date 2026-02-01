@@ -25,6 +25,26 @@ _SPLIT_FILES = {
     "interactive_agent": "data/interactive_agent.jsonl",
 }
 
+# ── Format instruction injected into every prompt ─────────────────────
+# The model must know the expected output format so GRPO can reward it.
+# Without this, R_fmt = R_tool = 0 on every step because the model never
+# produces <think>/<action>/<answer> tags by accident.
+FORMAT_INSTRUCTION = (
+    "[Response Format]\n"
+    "You must structure your response using these tags:\n"
+    "1. Wrap your reasoning in <think>...</think> tags.\n"
+    "2. If you need to call a tool, use <action>tool_name(arg1=value1, arg2=value2)</action>.\n"
+    "3. If you can answer directly without tools, use <answer>your answer here</answer>.\n"
+    "\n"
+    "Example with tool call:\n"
+    "<think>I need to check the weather for the user.</think>\n"
+    "<action>get_weather(city=\"London\")</action>\n"
+    "\n"
+    "Example with direct answer:\n"
+    "<think>I know the capital of France.</think>\n"
+    "<answer>The capital of France is Paris.</answer>"
+)
+
 
 @dataclass
 class AgenticSample:
@@ -110,6 +130,9 @@ def _build_prompt(messages: list[dict], tools: list[dict]) -> str:
         if tool_descs:
             parts.append("[Available Tools]\n" + "\n".join(tool_descs))
 
+    # Format instructions (so the model knows about <think>/<action>/<answer>)
+    parts.append(FORMAT_INSTRUCTION)
+
     # User turns up to first assistant response
     for msg in messages:
         role = msg.get("role", "")
@@ -143,6 +166,9 @@ def _build_multiturn_prompt(messages: list[dict], tools: list[dict], max_turns: 
             tool_descs.append(f"- {name}: {desc}")
         if tool_descs:
             parts.append("[Available Tools]\n" + "\n".join(tool_descs))
+
+    # Format instructions
+    parts.append(FORMAT_INSTRUCTION)
 
     # Collect conversation turns (skip system)
     turn_count = 0

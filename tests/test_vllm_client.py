@@ -29,6 +29,18 @@ class TestVLLMClientInit:
         assert client.use_chat_api is True
         assert client.max_retries == 3
         assert client.max_model_len == 8192
+        # System message for format guidance is set by default
+        assert client.system_message is not None
+        assert "<think>" in client.system_message
+        assert "<action>" in client.system_message
+
+    def test_custom_system_message(self):
+        client = VLLMClient(system_message="Custom system prompt")
+        assert client.system_message == "Custom system prompt"
+
+    def test_no_system_message(self):
+        client = VLLMClient(system_message="")
+        assert client.system_message == ""
 
     def test_custom_params(self):
         client = VLLMClient(

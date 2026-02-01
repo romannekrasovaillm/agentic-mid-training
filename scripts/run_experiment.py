@@ -543,6 +543,10 @@ def main():
                         f"adv={rd['advantage']:+.3f} len={rd['output_len']}"
                     )
                     log.info(f"  │     ▸ {rd['output_snippet']}")
+                    # Show WHY reward is 0 when relevant
+                    diag = rd.get("diagnosis", "")
+                    if diag and (rd["r_format"] == 0.0 or rd["r_tool"] == 0.0):
+                        log.info(f"  │     ✗ {diag}")
                 log.info(f"  └─")
             log.info("=" * 80)
 

@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from entropy_reward.data import (
     AgenticSample,
+    FORMAT_INSTRUCTION,
     _build_prompt,
     _build_multiturn_prompt,
     _extract_tool_names,
@@ -94,6 +95,20 @@ class TestBuildPrompt:
         prompt = _build_prompt(msgs, [])
         assert "[User]" in prompt
         assert "Hello" in prompt
+
+    def test_format_instruction_present(self):
+        """Prompt must contain format instructions so the model knows about
+        <think>/<action>/<answer> tags — otherwise R_fmt=0 forever."""
+        prompt = _build_prompt(SAMPLE_MESSAGES, SAMPLE_TOOLS)
+        assert "[Response Format]" in prompt
+        assert "<think>" in prompt
+        assert "<action>" in prompt
+        assert "<answer>" in prompt
+
+    def test_format_instruction_in_multiturn(self):
+        prompt = _build_multiturn_prompt(SAMPLE_MESSAGES, SAMPLE_TOOLS, max_turns=2)
+        assert "[Response Format]" in prompt
+        assert "<think>" in prompt
 
 
 class TestMultiturnPrompt:
