@@ -96,7 +96,7 @@ vllm:
   base_url: "http://localhost:8000"
   tensor_parallel_size: 1  # H200 single GPU is enough for 10B MoE
   gpu_memory_utilization: 0.25  # was 0.30 — reduced max_model_len frees KV cache, +7GB for training
-  max_model_len: 6144  # was 8192 — prompts are ≤5200 tok + 512 gen = 5712, 6144 is enough
+  max_model_len: 7168  # prompt (≤5200) + gen (512) = 5712; 7168 gives ~1400 tok headroom
   enforce_eager: true  # avoid torch.compile issues with MoE FP8
   launch_server: true  # auto-start vLLM from run_experiment.py
   server_timeout: 300.0

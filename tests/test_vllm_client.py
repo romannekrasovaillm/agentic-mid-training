@@ -28,7 +28,7 @@ class TestVLLMClientInit:
         assert client.top_p == 0.9
         assert client.use_chat_api is True
         assert client.max_retries == 3
-        assert client.max_model_len == 6144
+        assert client.max_model_len == 7168
         # System message for format guidance is set by default
         assert client.system_message is not None
         assert "<think>" in client.system_message
@@ -193,7 +193,7 @@ class TestVLLMConfig:
         assert cfg.base_url == "http://localhost:8000"
         assert cfg.tensor_parallel_size == 1
         assert cfg.gpu_memory_utilization == 0.25
-        assert cfg.max_model_len == 6144
+        assert cfg.max_model_len == 7168
         assert cfg.launch_server is True
         assert cfg.enforce_eager is True
 

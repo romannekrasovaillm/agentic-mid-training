@@ -38,7 +38,7 @@ class VLLMClient:
         timeout: float = 300.0,
         max_retries: int = 3,
         use_chat_api: bool = True,
-        max_model_len: int = 6144,
+        max_model_len: int = 7168,
         system_message: str | None = None,
     ):
         self.base_url = base_url.rstrip("/")
