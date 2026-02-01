@@ -124,8 +124,8 @@ class VLLMConfig:
     enabled: bool = True
     base_url: str = "http://localhost:8000"
     tensor_parallel_size: int = 1
-    gpu_memory_utilization: float = 0.30
-    max_model_len: int = 8192
+    gpu_memory_utilization: float = 0.25
+    max_model_len: int = 6144
     enforce_eager: bool = True  # avoid torch.compile issues with MoE FP8
     launch_server: bool = True  # auto-launch vLLM server from run_experiment
     server_timeout: float = 300.0  # seconds to wait for server readiness
@@ -137,7 +137,7 @@ class VLLMConfig:
 class TrainingConfig:
     learning_rate: float = 5e-6
     batch_size: int = 6
-    group_size: int = 4  # GRPO group size
+    group_size: int = 8  # GRPO group size
     max_steps: int = 5000
     max_seq_len: int = 4096
     gradient_accumulation_steps: int = 4

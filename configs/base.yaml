@@ -30,7 +30,7 @@ dataset:
 training:
   learning_rate: 5.0e-6
   batch_size: 6
-  group_size: 4
+  group_size: 8  # was 4 — more rollouts per prompt = lower variance GRPO gradients
   max_steps: 5000
   max_seq_len: 4096
   gradient_accumulation_steps: 4
@@ -95,8 +95,8 @@ vllm:
   enabled: true  # use vLLM for fast batched rollout generation
   base_url: "http://localhost:8000"
   tensor_parallel_size: 1  # H200 single GPU is enough for 10B MoE
-  gpu_memory_utilization: 0.30  # leave room for HF policy + ref models
-  max_model_len: 8192
+  gpu_memory_utilization: 0.25  # was 0.30 — reduced max_model_len frees KV cache, +7GB for training
+  max_model_len: 6144  # was 8192 — prompts are ≤5200 tok + 512 gen = 5712, 6144 is enough
   enforce_eager: true  # avoid torch.compile issues with MoE FP8
   launch_server: true  # auto-start vLLM from run_experiment.py
   server_timeout: 300.0
