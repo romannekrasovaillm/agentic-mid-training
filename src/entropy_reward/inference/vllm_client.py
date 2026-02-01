@@ -253,16 +253,16 @@ class VLLMClient:
             list of generated text strings, same length as prompts.
         """
         t0 = time.time()
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
 
-        results = loop.run_until_complete(self._generate_batch_async(prompts))
+        async def _run():
+            try:
+                return await self._generate_batch_async(prompts)
+            finally:
+                # Close aiohttp session — each asyncio.run() gets a fresh
+                # event loop, so the session must not leak across loops.
+                await self.close()
+
+        results = asyncio.run(_run())
         elapsed = time.time() - t0
         logger.info(
             f"vLLM batch generation: {len(prompts)} prompts in {elapsed:.1f}s "
