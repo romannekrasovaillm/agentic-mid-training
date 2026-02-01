@@ -67,7 +67,7 @@ reward:
 
 metrics:
   log_interval: 50
-  eval_interval: 200
+  eval_interval: 1000  # was 200 — eval uses slow HF generate, not vLLM
   self_bleu_n: 4
   self_bleu_sample_size: 100
   track_advantage_stats: true
@@ -76,8 +76,8 @@ metrics:
 eval:
   ood_enabled: true
   ood_datasets: ["format_variation", "tool_variation"]
-  metamorphic_enabled: true
-  redteam_enabled: true
+  metamorphic_enabled: false  # slow — re-enable after format is learned
+  redteam_enabled: false      # slow — re-enable after format is learned
   redteam_exploit_budget: 50
 
 stop:
