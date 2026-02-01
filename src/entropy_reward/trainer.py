@@ -171,9 +171,9 @@ class GRPOTrainer:
         self.vllm_client = client
         logger.info("vLLM client attached — generation will use vLLM server")
 
-        # Wire up eval harness generation
-        def generate_fn(prompt: str, tools: list[str] | None) -> str:
-            return self._generate(prompt)
+        # Wire up eval harness generation — use vLLM (fast) instead of HF
+        def generate_fn(prompt: str, tools: list[str] | None = None) -> str:
+            return client.generate(prompt)
 
         if self.ood_eval:
             self.ood_eval.set_generate_fn(generate_fn)
