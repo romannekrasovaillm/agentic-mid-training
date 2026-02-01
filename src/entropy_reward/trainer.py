@@ -293,27 +293,35 @@ class GRPOTrainer:
                         )
             gen_elapsed = time.time() - t_gen_start
 
-        # 2) Compute decomposed rewards
-        rewards_list = self.reward_fn.compute_batch(all_texts, all_acc)
+        # 2) Compute decomposed rewards + diagnostics
+        rewards_list, reward_diags = self.reward_fn.compute_batch_with_diagnosis(
+            all_texts, all_acc
+        )
         r_format = torch.tensor([r.r_format for r in rewards_list], device=self.device)
         r_tool = torch.tensor([r.r_tool for r in rewards_list], device=self.device)
         r_acc = torch.tensor([r.r_acc for r in rewards_list], device=self.device)
         r_total = torch.tensor([r.r_total for r in rewards_list], device=self.device)
 
-        # --- Verbose per-sample logging ---
-        logger.debug(f"[Step {step}] === PROMPTS & ROLLOUTS ({len(prompts)} prompts × {group_size} rollouts) ===")
+        # --- Verbose per-sample logging with WHY for zero rewards ---
+        logger.info(
+            f"[Step {step}] === REWARD DIAGNOSIS ({len(prompts)} prompts × {group_size} rollouts) ==="
+        )
         idx = 0
         for pi, prompt in enumerate(prompts):
-            logger.debug(f"  ┌─ Prompt {pi}: {_snippet(prompt)}")
+            logger.info(f"  ┌─ Prompt {pi}: {_snippet(prompt)}")
             for gi in range(group_size):
                 r = rewards_list[idx]
-                logger.debug(
+                d = reward_diags[idx]
+                logger.info(
                     f"  │  Rollout {gi}: R_fmt={r.r_format:.2f} R_tool={r.r_tool:.2f} "
                     f"R_acc={r.r_acc:.2f} R_total={r.r_total:.2f}"
                 )
-                logger.debug(f"  │    ▸ {_snippet(all_texts[idx])}")
+                logger.info(f"  │    ▸ {_snippet(all_texts[idx])}")
+                # Log WHY for each zero component
+                if r.r_format == 0.0 or r.r_tool == 0.0:
+                    logger.info(f"  │    ✗ {d['reason']}")
                 idx += 1
-            logger.debug(f"  └─")
+            logger.info(f"  └─")
 
         # 3) Compute advantages
         if self.config.reward.separate_baselines:
@@ -513,6 +521,7 @@ class GRPOTrainer:
         for pi, prompt in enumerate(prompts):
             for gi in range(group_size):
                 r = rewards_list[idx]
+                d = reward_diags[idx]
                 rollout_details.append({
                     "prompt_idx": pi,
                     "rollout_idx": gi,
@@ -524,6 +533,10 @@ class GRPOTrainer:
                     "r_acc": r.r_acc,
                     "r_total": r.r_total,
                     "advantage": advantages[idx].item(),
+                    "diagnosis": d["reason"],
+                    "has_think": d["has_think"],
+                    "has_action": d["has_action"],
+                    "has_answer": d["has_answer"],
                 })
                 idx += 1
 
