@@ -1,0 +1,52 @@
+name: "full_recipe"
+description: "Full entropy-stability recipe — adaptive entropy + cosine KL + LOO + partial format"
+
+model:
+  generation:
+    max_new_tokens: 768
+    temperature: 0.6
+
+training:
+  output_dir: "outputs/full_recipe"
+  wandb_run_name: "full-entropy-stability-recipe"
+  max_steps: 8000
+  max_seq_len: 4096
+
+entropy:
+  strategy: "adaptive"
+  adaptive_target_entropy: 0.0
+  adaptive_alpha: 0.05
+  adaptive_min_coeff: 0.002
+  adaptive_max_coeff: 0.08
+  diversity_ema_decay: 0.995
+  entropy_drop_threshold: 0.25
+
+kl:
+  enabled: true
+  initial_coeff: 0.25
+  final_coeff: 0.01
+  schedule: "cosine"
+  warmup_steps: 200
+  total_steps: 8000
+
+reward:
+  format_mode: "partial"
+  format_weight: 1.0
+  tool_weight: 1.0
+  accuracy_weight: 1.0
+  partial_tag_credit: 0.3
+  partial_structure_credit: 0.5
+  partial_full_credit: 1.0
+  baseline: "leave_one_out"
+  separate_baselines: true
+
+eval:
+  ood_enabled: true
+  metamorphic_enabled: true
+  redteam_enabled: true
+  redteam_exploit_budget: 100
+
+stop:
+  entropy_collapse_threshold: 0.25
+  entropy_collapse_window: 80
+  diversity_collapse_threshold: 0.35

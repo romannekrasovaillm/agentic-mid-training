@@ -1,0 +1,25 @@
+name: "adaptive_entropy"
+description: "Adaptive entropy bonus — adjusts coefficient based on diversity/entropy signals"
+
+training:
+  output_dir: "outputs/adaptive_entropy"
+  wandb_run_name: "adaptive-entropy"
+
+entropy:
+  strategy: "adaptive"
+  adaptive_target_entropy: 0.0   # auto-detect from initial measurement
+  adaptive_alpha: 0.1
+  adaptive_min_coeff: 0.001
+  adaptive_max_coeff: 0.1
+  diversity_ema_decay: 0.99
+  entropy_drop_threshold: 0.3
+
+kl:
+  enabled: true
+  initial_coeff: 0.2
+  final_coeff: 0.02
+  schedule: "cosine"
+
+reward:
+  format_mode: "strict"
+  baseline: "group_norm"
