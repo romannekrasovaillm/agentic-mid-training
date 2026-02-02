@@ -172,14 +172,19 @@ class GRPOTrainer:
         self.vllm_client = client
         logger.info("vLLM client attached — generation will use vLLM server")
 
-        # Wire up eval harness generation
+        # Wire up eval harness generation — use vLLM batch for speed
         def generate_fn(prompt: str, tools: list[str] | None) -> str:
-            return self._generate(prompt)
+            return client.generate(prompt)
+
+        def generate_batch_fn(prompts: list[str]) -> list[str]:
+            return client.generate_batch(prompts)
 
         if self.ood_eval:
             self.ood_eval.set_generate_fn(generate_fn)
+            self.ood_eval.set_generate_batch_fn(generate_batch_fn)
         if self.metamorphic:
             self.metamorphic.set_generate_fn(generate_fn)
+            self.metamorphic.set_generate_batch_fn(generate_batch_fn)
         if self.redteam:
             self.redteam.set_reward_fn(lambda text: self.reward_fn.compute(text).r_total)
 

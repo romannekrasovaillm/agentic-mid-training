@@ -47,29 +47,107 @@ class MetamorphicTester:
     ):
         self.transforms = transforms or list(self.TRANSFORMS.keys())
         self.generate_fn = generate_fn
+        self.generate_batch_fn: Callable | None = None
         self.answer_extract_fn = answer_extract_fn or self._default_answer_extract
 
     def set_generate_fn(self, fn: Callable):
         self.generate_fn = fn
 
+    def set_generate_batch_fn(self, fn: Callable):
+        """Set the batched generation function: fn(prompts) -> list[str]."""
+        self.generate_batch_fn = fn
+
     def test(self, prompts: list[str], tools: list[str] | None = None) -> list[MetamorphicResult]:
-        """Run metamorphic tests across all configured transforms."""
+        """Run metamorphic tests across all configured transforms.
+
+        When generate_batch_fn is available, collects ALL original+transformed
+        prompts and generates in one batch for speed.
+        """
+        if self.generate_batch_fn is not None:
+            return self._test_batched(prompts, tools)
+
+        # Fallback: sequential
         results = []
         for transform_name in self.transforms:
             if transform_name not in self.TRANSFORMS:
                 continue
             method = getattr(self, self.TRANSFORMS[transform_name])
-            result = self._run_transform(transform_name, method, prompts, tools)
+            result = self._run_transform_seq(transform_name, method, prompts, tools)
             results.append(result)
         return results
 
-    def _run_transform(
+    def _test_batched(self, prompts: list[str], tools: list[str] | None) -> list[MetamorphicResult]:
+        """Batched metamorphic testing: one generation call for all prompts."""
+        # Collect all prompts: for each transform × prompt we need
+        # (original, transformed) pair → 2 generations per pair.
+        batch_prompts: list[str] = []
+        # Meta: (transform_name, prompt_idx, is_transformed)
+        batch_meta: list[tuple[str, int, bool]] = []
+
+        valid_transforms: list[str] = []
+        for transform_name in self.transforms:
+            if transform_name not in self.TRANSFORMS:
+                continue
+            valid_transforms.append(transform_name)
+            method = getattr(self, self.TRANSFORMS[transform_name])
+            for i, prompt in enumerate(prompts):
+                transformed = method(prompt, tools)
+                # Original
+                batch_prompts.append(prompt)
+                batch_meta.append((transform_name, i, False))
+                # Transformed
+                batch_prompts.append(transformed)
+                batch_meta.append((transform_name, i, True))
+
+        if not batch_prompts:
+            return []
+
+        # Single batched generation call
+        all_outputs = self.generate_batch_fn(batch_prompts)
+
+        # Pair up results: group by (transform_name, prompt_idx)
+        # outputs come in pairs: [original_0, transformed_0, original_1, ...]
+        from collections import defaultdict
+        originals: dict[tuple[str, int], str] = {}
+        transformeds: dict[tuple[str, int], str] = {}
+
+        for output, (tname, pidx, is_trans) in zip(all_outputs, batch_meta):
+            key = (tname, pidx)
+            if is_trans:
+                transformeds[key] = output
+            else:
+                originals[key] = output
+
+        # Score consistency per transform
+        results = []
+        for transform_name in valid_transforms:
+            consistent = 0
+            total = len(prompts)
+            for i in range(total):
+                key = (transform_name, i)
+                orig_out = originals.get(key, "")
+                trans_out = transformeds.get(key, "")
+                orig_answer = self.answer_extract_fn(orig_out)
+                trans_answer = self.answer_extract_fn(trans_out)
+                if self._answers_equivalent(orig_answer, trans_answer):
+                    consistent += 1
+            results.append(MetamorphicResult(
+                transform_name=transform_name,
+                total=total,
+                consistent=consistent,
+                consistency_rate=consistent / max(total, 1),
+            ))
+
+        return results
+
+    def _run_transform_seq(
         self,
         name: str,
         transform_fn: Callable,
         prompts: list[str],
         tools: list[str] | None,
     ) -> MetamorphicResult:
+        """Sequential per-prompt transform evaluation (fallback)."""
         consistent = 0
         total = len(prompts)
 
