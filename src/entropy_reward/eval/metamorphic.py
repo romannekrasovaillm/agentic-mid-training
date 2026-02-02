@@ -173,7 +173,17 @@ class MetamorphicTester:
         )
 
     def _transform_reorder_tools(self, prompt: str, tools: list[str] | None) -> str:
-        """Reorder tool descriptions in the prompt."""
+        """Reorder tool descriptions in the prompt.
+
+        If explicit tools list is not provided, tries to extract tool names
+        from an "Available tools:" line in the prompt itself.
+        """
+        if not tools:
+            # Try to extract from prompt text
+            match = re.search(r"Available tools:\s*(.+?)(?:\n|$)", prompt)
+            if match:
+                tools = re.findall(r"(\w+)\(\)", match.group(1))
+
         if tools and len(tools) > 1:
             shuffled = tools.copy()
             random.shuffle(shuffled)
@@ -234,9 +244,25 @@ class MetamorphicTester:
         return lines[-1].strip() if lines else ""
 
     @staticmethod
-    def _answers_equivalent(a: str, b: str) -> bool:
-        """Check if two answers are semantically equivalent (simplified)."""
-        # Normalize whitespace and case
-        a_norm = " ".join(a.lower().split())
-        b_norm = " ".join(b.lower().split())
-        return a_norm == b_norm
+    def _answers_equivalent(a: str, b: str, threshold: float = 0.5) -> bool:
+        """Check if two answers are semantically equivalent via token F1.
+
+        Exact string match is too strict for LLMs (temperature > 0 produces
+        different wording for the same content).  Token F1 captures whether
+        the same key information is present regardless of phrasing.
+        """
+        a_tokens = set(a.lower().split())
+        b_tokens = set(b.lower().split())
+
+        if not a_tokens and not b_tokens:
+            return True
+        if not a_tokens or not b_tokens:
+            return False
+
+        common = a_tokens & b_tokens
+        precision = len(common) / len(a_tokens)
+        recall = len(common) / len(b_tokens)
+        if precision + recall == 0:
+            return False
+        f1 = 2 * precision * recall / (precision + recall)
+        return f1 >= threshold

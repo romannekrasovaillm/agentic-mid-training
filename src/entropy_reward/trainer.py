@@ -640,7 +640,9 @@ class GRPOTrainer:
                 results["recovery_speed"] = recovery
 
         if self.metamorphic:
-            meta_results = self.metamorphic.test(test_prompts)
+            # Pass available tools so reorder_tools transform works
+            meta_tools = sorted(self.reward_fn.available_tools) if self.reward_fn.available_tools else None
+            meta_results = self.metamorphic.test(test_prompts, tools=meta_tools)
             results["metamorphic"] = [
                 {"transform": r.transform_name, "consistency": r.consistency_rate}
                 for r in meta_results
