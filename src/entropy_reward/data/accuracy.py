@@ -172,6 +172,14 @@ def score_tool_args_match(
     return total_score / max(matched_refs, 1)
 
 
+TAG_STRIP_PATTERN = re.compile(r"</?(?:think|action|answer)>")
+
+
+def _strip_tags(text: str) -> str:
+    """Remove <think>, <action>, <answer> and their closing tags from text."""
+    return TAG_STRIP_PATTERN.sub(" ", text)
+
+
 def score_response_overlap(predicted: str, reference: str) -> float:
     """Token-level overlap between predicted and reference response."""
     if not reference:
@@ -179,9 +187,13 @@ def score_response_overlap(predicted: str, reference: str) -> float:
     if not predicted:
         return 0.0
 
+    # Strip format tags so they don't dilute the F1 score
+    pred_clean = _strip_tags(predicted)
+    ref_clean = _strip_tags(reference)
+
     # Simple word overlap (case-insensitive)
-    pred_tokens = set(predicted.lower().split())
-    ref_tokens = set(reference.lower().split())
+    pred_tokens = set(pred_clean.lower().split())
+    ref_tokens = set(ref_clean.lower().split())
 
     if not ref_tokens:
         return 0.5

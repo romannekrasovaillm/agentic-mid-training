@@ -25,6 +25,7 @@ from entropy_reward.data.accuracy import (
     FUNCTION_CALL_PATTERN,
     _normalize_args,
     _parse_args,
+    _strip_tags,
     compute_accuracy,
     extract_tool_calls_from_text,
     score_response_overlap,
@@ -559,6 +560,45 @@ class TestScoreResponseOverlap:
         # precision = 50/100, recall = 50/100, F1 = 0.5
         assert abs(score - 0.5) < 0.01
 
+    def test_tags_stripped_before_comparison(self):
+        """Tags should not pollute the token set — they get stripped."""
+        pred = "<think>hello world</think>\n<answer>foo bar</answer>"
+        ref = "hello world foo bar"
+        score = score_response_overlap(pred, ref)
+        # After stripping: pred = "hello world foo bar" → perfect overlap
+        assert score == 1.0
+
+    def test_action_tags_stripped(self):
+        pred = "<action>get_weather(city=London)</action>"
+        ref = "get_weather(city=London)"
+        score = score_response_overlap(pred, ref)
+        assert score == 1.0
+
+
+class TestStripTags:
+    def test_think_tags(self):
+        assert "think" not in _strip_tags("<think>hello</think>")
+        assert "hello" in _strip_tags("<think>hello</think>")
+
+    def test_action_tags(self):
+        assert "<action>" not in _strip_tags("<action>tool()</action>")
+
+    def test_answer_tags(self):
+        assert "<answer>" not in _strip_tags("<answer>42</answer>")
+
+    def test_no_tags(self):
+        assert _strip_tags("plain text") == "plain text"
+
+    def test_mixed_tags(self):
+        text = "<think>reason</think>\n<action>do()</action>\n<answer>done</answer>"
+        result = _strip_tags(text)
+        assert "<think>" not in result
+        assert "<action>" not in result
+        assert "<answer>" not in result
+        assert "reason" in result
+        assert "do()" in result
+        assert "done" in result
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  compute_accuracy (end-to-end)
@@ -738,12 +778,9 @@ class TestRealisticModelOutputs:
             "The capital of France is Paris.",
             [],
         )
-        # NOTE: response_overlap is ~0.4 (not >0.5) because score_response_overlap
-        # operates on the raw generated text including <think>/<answer> tags.
-        # Tags like "<think>the" and "paris.</answer>" are treated as separate
-        # tokens that don't match reference words, reducing precision.
-        # This is a known limitation — stripping tags before F1 would improve this.
-        assert result.response_overlap > 0.3
+        # After tag stripping, response_overlap should be high
+        # because the answer text matches the reference well
+        assert result.response_overlap > 0.5
         assert result.score > 0.5
 
     def test_bad_output_accuracy(self):

@@ -339,9 +339,6 @@ def main():
             config=asdict(config),
         )
 
-    # Accuracy scorer
-    from entropy_reward.data.accuracy import compute_accuracy
-
     # Training loop
     batch_size = config.training.batch_size
     log_interval = config.metrics.log_interval
@@ -401,12 +398,14 @@ def main():
                 f"(up to {config.model.generation.max_new_tokens} tok each)…"
             )
 
-        # Accuracy will be computed after generation inside trainer,
-        # for now pass 0 (trainer.train_step handles R_acc externally)
-        batch_acc = [0.0] * batch_size
+        # Reference data for accuracy scoring (computed inside trainer after generation)
+        batch_ref_responses = [s.reference_response for s in batch_samples]
+        batch_ref_tool_calls = [s.reference_tool_calls for s in batch_samples]
 
         # Train step
-        metrics = trainer.train_step(batch_prompts, batch_acc, step)
+        metrics = trainer.train_step(
+            batch_prompts, batch_ref_responses, batch_ref_tool_calls, step
+        )
 
         step_time = _time.time() - _step_start
 
