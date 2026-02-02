@@ -238,6 +238,31 @@ class TestParseArgs:
         result = _parse_args("{invalid json}")
         assert isinstance(result, dict)
 
+    def test_json_int_wrapped(self):
+        """json.loads('123') returns int — must be wrapped in dict."""
+        result = _parse_args("123")
+        assert isinstance(result, dict)
+        assert result == {"arg_0": 123}
+
+    def test_json_float_wrapped(self):
+        result = _parse_args("3.14")
+        assert isinstance(result, dict)
+        assert result == {"arg_0": 3.14}
+
+    def test_json_list_wrapped(self):
+        result = _parse_args('[1, 2, 3]')
+        assert isinstance(result, dict)
+        assert result == {"arg_0": [1, 2, 3]}
+
+    def test_json_bool_wrapped(self):
+        result = _parse_args("true")
+        assert isinstance(result, dict)
+        assert result == {"arg_0": True}
+
+    def test_json_null_wrapped(self):
+        result = _parse_args("null")
+        assert isinstance(result, dict)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  _normalize_args
@@ -267,6 +292,31 @@ class TestNormalizeArgs:
         result = _normalize_args("")
         # Empty string is not valid JSON, falls to {"raw": ""}
         assert result == {"raw": ""}
+
+    def test_int_wrapped(self):
+        """int arguments must be wrapped — caused AttributeError in production."""
+        result = _normalize_args(42)
+        assert isinstance(result, dict)
+        assert result == {"arg_0": 42}
+
+    def test_float_wrapped(self):
+        result = _normalize_args(3.14)
+        assert isinstance(result, dict)
+
+    def test_list_wrapped(self):
+        result = _normalize_args([1, 2, 3])
+        assert isinstance(result, dict)
+        assert result == {"arg_0": [1, 2, 3]}
+
+    def test_bool_wrapped(self):
+        result = _normalize_args(True)
+        assert isinstance(result, dict)
+
+    def test_json_string_with_int(self):
+        """JSON string '123' should be wrapped, not returned as int."""
+        result = _normalize_args("123")
+        assert isinstance(result, dict)
+        assert result == {"arg_0": 123}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -419,6 +469,33 @@ class TestScoreToolArgsMatch:
         ref = [{"function": {"name": "search", "arguments": '{"query": "pizza", "limit": "10"}'}}]
         score = score_tool_args_match(pred, ref)
         assert score == 1.0
+
+    def test_int_args_no_crash(self):
+        """Regression: int arguments caused 'int has no attribute keys'."""
+        pred = [{"name": "get_item", "arguments": 42}]
+        ref = [{"function": {"name": "get_item", "arguments": '{"id": "42"}'}}]
+        score = score_tool_args_match(pred, ref)
+        assert isinstance(score, float)
+        assert 0.0 <= score <= 1.0
+
+    def test_list_args_no_crash(self):
+        pred = [{"name": "batch", "arguments": [1, 2, 3]}]
+        ref = [{"function": {"name": "batch", "arguments": '{"items": [1,2,3]}'}}]
+        score = score_tool_args_match(pred, ref)
+        assert isinstance(score, float)
+
+    def test_bool_args_no_crash(self):
+        pred = [{"name": "toggle", "arguments": True}]
+        ref = [{"function": {"name": "toggle", "arguments": '{"enabled": true}'}}]
+        score = score_tool_args_match(pred, ref)
+        assert isinstance(score, float)
+
+    def test_ref_args_as_int_string(self):
+        """Reference arguments stored as '123' string (non-dict JSON)."""
+        pred = [{"name": "get_item", "arguments": {"id": "123"}}]
+        ref = [{"function": {"name": "get_item", "arguments": "123"}}]
+        score = score_tool_args_match(pred, ref)
+        assert isinstance(score, float)
 
 
 # ═══════════════════════════════════════════════════════════════════════

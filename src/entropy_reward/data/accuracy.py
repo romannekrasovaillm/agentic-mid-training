@@ -65,7 +65,11 @@ def _parse_args(args_str: str) -> dict[str, Any]:
         return {}
     # Try JSON first
     try:
-        return json.loads(args_str)
+        parsed = json.loads(args_str)
+        if isinstance(parsed, dict):
+            return parsed
+        # json.loads can return int/float/list/str/bool — wrap them
+        return {"arg_0": parsed}
     except (json.JSONDecodeError, ValueError):
         pass
     # Try key=value pairs
@@ -80,14 +84,20 @@ def _parse_args(args_str: str) -> dict[str, Any]:
     return args
 
 
-def _normalize_args(args: dict | str) -> dict:
+def _normalize_args(args: dict | str | Any) -> dict:
     """Normalize arguments to a comparable dict."""
+    if args is None:
+        return {}
+    if isinstance(args, dict):
+        return args
     if isinstance(args, str):
         try:
-            return json.loads(args)
+            parsed = json.loads(args)
+            return parsed if isinstance(parsed, dict) else {"arg_0": parsed}
         except (json.JSONDecodeError, ValueError):
             return {"raw": args}
-    return args or {}
+    # int, float, list, bool — wrap so .keys() never fails
+    return {"arg_0": args}
 
 
 def score_tool_name_match(
