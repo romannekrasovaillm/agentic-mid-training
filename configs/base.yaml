@@ -1,0 +1,104 @@
+name: "base"
+description: "Base configuration — constant entropy bonus, strict format reward (GigaChat3 MoE)"
+
+model:
+  name: "ai-sage/GigaChat3-10B-A1.8B"
+  ref_model_name: ""  # if empty, same as model name
+  torch_dtype: "bfloat16"
+  attn_implementation: "flash_attention_2"  # "eager" / "sdpa" if no flash-attn
+  trust_remote_code: true
+  device_map: "auto"
+  max_memory: {}  # e.g. {"0": "20GiB", "cpu": "30GiB"}
+  use_chat_template: true
+  generation:
+    max_new_tokens: 512
+    temperature: 0.7
+    top_p: 0.9
+    do_sample: true
+
+dataset:
+  name: "nvidia/Nemotron-Agentic-v1"
+  train_split: "tool_calling"
+  eval_split: "interactive_agent"
+  max_train_samples: 0  # 0 = use all
+  max_eval_samples: 200
+  multiturn: false
+  max_context_turns: 3
+  accuracy_tool_weight: 0.6
+  accuracy_response_weight: 0.4
+
+training:
+  learning_rate: 5.0e-6
+  batch_size: 6
+  group_size: 4
+  max_steps: 5000
+  max_seq_len: 4096
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  seed: 42
+  bf16: true
+  output_dir: "outputs/base"
+  wandb_project: "entropy-reward-experiments"
+  wandb_run_name: "base-const-strict"
+  checkpoint_interval: 500
+
+entropy:
+  strategy: "constant"
+  constant_bonus: 0.01
+
+kl:
+  enabled: true
+  initial_coeff: 0.2
+  final_coeff: 0.02
+  schedule: "linear"
+  warmup_steps: 100
+  total_steps: 5000
+
+reward:
+  format_mode: "strict"
+  format_weight: 1.0
+  tool_weight: 1.0
+  accuracy_weight: 1.0
+  baseline: "group_norm"
+  separate_baselines: false
+
+metrics:
+  log_interval: 50
+  eval_interval: 200
+  self_bleu_n: 4
+  self_bleu_sample_size: 100
+  track_advantage_stats: true
+  track_cps: true
+
+eval:
+  ood_enabled: true
+  ood_datasets: ["format_variation", "tool_variation"]
+  metamorphic_enabled: true
+  redteam_enabled: true
+  redteam_exploit_budget: 50
+
+stop:
+  entropy_collapse_threshold: 0.3
+  entropy_collapse_window: 50
+  diversity_collapse_threshold: 0.4
+  hacking_passrate_threshold: 0.8
+  hacking_eval_interval: 200
+  advantage_drift_threshold: 2.0
+  advantage_drift_window: 100
+
+# vLLM server for fast batched generation (rollouts).
+# HF model is still used for forward-pass logits (GRPO loss) and KL.
+vllm:
+  enabled: true  # use vLLM for fast batched rollout generation
+  base_url: "http://localhost:8000"
+  tensor_parallel_size: 1  # H200 single GPU is enough for 10B MoE
+  gpu_memory_utilization: 0.30  # leave room for HF policy + ref models
+  max_model_len: 8192
+  enforce_eager: true  # avoid torch.compile issues with MoE FP8
+  launch_server: true  # auto-start vLLM from run_experiment.py
+  server_timeout: 300.0
+  max_retries: 3
+  request_timeout: 300.0

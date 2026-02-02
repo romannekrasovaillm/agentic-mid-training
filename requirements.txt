@@ -1,0 +1,24 @@
+torch>=2.2.0
+transformers>=4.45.0
+accelerate>=0.30.0
+datasets>=2.16.0
+peft>=0.7.0
+trl>=0.7.0
+pyyaml>=6.0
+numpy>=1.24.0
+scipy>=1.11.0
+nltk>=3.8.0
+wandb>=0.16.0
+tensorboard>=2.15.0
+jsonlines>=4.0.0
+tqdm>=4.66.0
+pandas>=2.1.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+scikit-learn>=1.3.0
+pytest>=7.4.0
+pytest-cov>=4.1.0
+# flash-attn — install separately (needs CUDA build):
+#   pip install flash-attn --no-build-isolation
+# vLLM — for serving GigaChat3 with MTP speculative decoding:
+#   pip install vllm
