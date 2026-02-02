@@ -7,6 +7,7 @@ Measures robustness and recovery speed after stagnation.
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -45,23 +46,17 @@ class OODEvaluator:
         },
     }
 
-    # Tool variation templates
+    # Tool variation templates — each value is a list of tool names to present
+    # and check for.  "renamed_tools" uses names NOT seen during training.
     TOOL_VARIATIONS = {
-        "renamed_tools": {
-            "search": "web_lookup",
-            "calculate": "math_eval",
-            "code_run": "execute_code",
-        },
-        "extra_tools": {
-            "search": "search",
-            "calculate": "calculate",
-            "summarize": "summarize",
-            "translate": "translate",
-        },
-        "minimal_tools": {
-            "do": "do",
-        },
+        "renamed_tools": ["web_lookup", "math_eval", "execute_code"],
+        "extra_tools": ["search", "calculate", "summarize", "translate"],
+        "minimal_tools": ["do_task"],
     }
+
+    # Regex for checking actual tool *calls* (not just substrings).
+    # Matches <action>tool_name(  — same pattern as ToolUseChecker.
+    _TOOL_CALL_RE = re.compile(r"<action>\s*(\w+)\s*\(")
 
     def __init__(
         self,
@@ -80,6 +75,16 @@ class OODEvaluator:
     def set_generate_batch_fn(self, fn: Callable):
         """Set the batched generation function: fn(prompts) -> list[str]."""
         self.generate_batch_fn = fn
+
+    @classmethod
+    def _check_tool_usage(cls, output: str, tool_names: list[str]) -> bool:
+        """Check if output contains an actual tool call for any of the given names.
+
+        Uses <action>tool_name( pattern, not bare substring, to avoid
+        false positives (e.g. the word 'do' in normal English text).
+        """
+        calls = cls._TOOL_CALL_RE.findall(output)
+        return any(c in tool_names for c in calls)
 
     def evaluate(self, test_prompts: list[str]) -> list[OODResult]:
         """Run OOD evaluation across all configured datasets.
@@ -102,8 +107,8 @@ class OODEvaluator:
                 results.append(result)
 
         if "tool_variation" in self.datasets:
-            for var_name, var_config in self.TOOL_VARIATIONS.items():
-                result = self._eval_tool_variation_seq(test_prompts, var_name, var_config)
+            for var_name, tool_names in self.TOOL_VARIATIONS.items():
+                result = self._eval_tool_variation_seq(test_prompts, var_name, tool_names)
                 results.append(result)
 
         self._results_history.append(results)
@@ -113,8 +118,8 @@ class OODEvaluator:
         """Batched evaluation: collect all prompts, generate once, score."""
         # Collect all modified prompts and metadata
         batch_prompts: list[str] = []
-        # Each entry: (variation_type, var_name, var_config, prompt_idx)
-        batch_meta: list[tuple[str, str, dict, int]] = []
+        # Each entry: (variation_type, var_name, var_config/tool_names, prompt_idx)
+        batch_meta: list[tuple[str, str, Any, int]] = []
 
         if "format_variation" in self.datasets:
             for var_name, var_config in self.FORMAT_VARIATIONS.items():
@@ -124,14 +129,14 @@ class OODEvaluator:
                     batch_meta.append(("format", var_name, var_config, i))
 
         if "tool_variation" in self.datasets:
-            for var_name, var_config in self.TOOL_VARIATIONS.items():
+            for var_name, tool_names in self.TOOL_VARIATIONS.items():
                 for i, prompt in enumerate(test_prompts):
                     tool_desc = "Available tools: " + ", ".join(
-                        f"{k}()" for k in var_config.keys()
+                        f"{t}()" for t in tool_names
                     )
                     modified = f"{tool_desc}\n\n{prompt}"
                     batch_prompts.append(modified)
-                    batch_meta.append(("tool", var_name, var_config, i))
+                    batch_meta.append(("tool", var_name, tool_names, i))
 
         if not batch_prompts:
             self._results_history.append([])
@@ -145,20 +150,17 @@ class OODEvaluator:
         format_pass_counts: dict[str, int] = defaultdict(int)
         tool_pass_counts: dict[str, int] = defaultdict(int)
         variation_totals: dict[str, int] = defaultdict(int)
-        variation_configs: dict[str, dict] = {}
-        variation_types: dict[str, str] = {}
 
         for output, (vtype, vname, vconfig, _pidx) in zip(all_outputs, batch_meta):
             key = f"{vtype}/{vname}"
             variation_totals[key] += 1
-            variation_configs[key] = vconfig
-            variation_types[key] = vtype
 
             if vtype == "format":
                 if all(tag in output for tag in vconfig["check_tags"]):
                     format_pass_counts[key] += 1
             elif vtype == "tool":
-                if any(t in output for t in vconfig.keys()):
+                # vconfig is a list[str] of tool names
+                if self._check_tool_usage(output, vconfig):
                     tool_pass_counts[key] += 1
 
         # Build OODResult list in same order as sequential version
@@ -221,21 +223,20 @@ class OODEvaluator:
         )
 
     def _eval_tool_variation_seq(
-        self, prompts: list[str], name: str, config: dict
+        self, prompts: list[str], name: str, tool_names: list[str]
     ) -> OODResult:
         """Test model with different tool names (sequential)."""
         tool_pass = 0
         total = len(prompts)
-        tools = list(config.keys())
 
         for prompt in prompts:
             tool_desc = "Available tools: " + ", ".join(
-                f"{k}()" for k in config.keys()
+                f"{t}()" for t in tool_names
             )
             modified_prompt = f"{tool_desc}\n\n{prompt}"
             if self.generate_fn:
-                output = self.generate_fn(modified_prompt, tools)
-                if any(t in output for t in config.keys()):
+                output = self.generate_fn(modified_prompt, tool_names)
+                if self._check_tool_usage(output, tool_names):
                     tool_pass += 1
 
         return OODResult(
