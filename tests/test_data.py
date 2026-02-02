@@ -212,3 +212,76 @@ class TestComputeAccuracy:
         ref_calls = [{"function": {"name": "place_order", "arguments": "{}"}}]
         result = compute_accuracy(generated, "", ref_calls)
         assert result.tool_name_match == 0.0
+
+
+class TestParserEdgeCases:
+    """Regression tests for parser bugs fixed in accuracy.py.
+
+    Bug 1: _parse_args split on ALL commas, including inside quoted values.
+    Bug 2: ACTION_PATTERN used [^)]* which failed on parens in values.
+    """
+
+    def test_commas_inside_quoted_values(self):
+        """Commas inside quoted arg values must not split the arg."""
+        text = '<action>search(query="hotels, restaurants", city="NYC")</action>'
+        calls = extract_tool_calls_from_text(text)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "search"
+        assert calls[0]["arguments"]["query"] == "hotels, restaurants"
+        assert calls[0]["arguments"]["city"] == "NYC"
+
+    def test_parens_inside_quoted_values(self):
+        """Parentheses inside quoted arg values must not break the regex."""
+        text = '<action>eval_expr(expr="max(1,2)")</action>'
+        calls = extract_tool_calls_from_text(text)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "eval_expr"
+        assert calls[0]["arguments"]["expr"] == "max(1,2)"
+
+    def test_multiline_action_with_commas_in_values(self):
+        """Multiline <action> blocks with commas inside values."""
+        text = (
+            "<action>hc360_search(\n"
+            '  query="HR analytics, workforce planning, Oracle HCM",\n'
+            "  max_results=10\n"
+            ")</action>"
+        )
+        calls = extract_tool_calls_from_text(text)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "hc360_search"
+        assert "Oracle HCM" in calls[0]["arguments"]["query"]
+        assert calls[0]["arguments"]["max_results"] == "10"
+
+    def test_simple_args_still_work(self):
+        """Simple key=value args without special chars."""
+        text = "<action>get_weather(city=London, units=metric)</action>"
+        calls = extract_tool_calls_from_text(text)
+        assert len(calls) == 1
+        assert calls[0]["arguments"]["city"] == "London"
+        assert calls[0]["arguments"]["units"] == "metric"
+
+    def test_no_args(self):
+        """Tool call with no arguments."""
+        text = "<action>get_all_news()</action>"
+        calls = extract_tool_calls_from_text(text)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "get_all_news"
+        assert calls[0]["arguments"] == {}
+
+    def test_accuracy_with_quoted_comma_args(self):
+        """End-to-end accuracy with commas in quoted values."""
+        generated = (
+            "<think>Searching for hotels and restaurants</think>\n"
+            '<action>search(query="hotels, restaurants", city="NYC")</action>'
+        )
+        ref_calls = [
+            {
+                "function": {
+                    "name": "search",
+                    "arguments": {"query": "hotels, restaurants", "city": "NYC"},
+                }
+            }
+        ]
+        result = compute_accuracy(generated, "", ref_calls)
+        assert result.tool_name_match == 1.0
+        assert result.tool_args_match == 1.0

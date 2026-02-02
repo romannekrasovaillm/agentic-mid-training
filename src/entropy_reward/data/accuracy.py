@@ -20,8 +20,11 @@ class AccuracyResult:
     response_overlap: float = 0.0  # token overlap with reference
 
 
-# Patterns to extract tool calls from generated text
-ACTION_PATTERN = re.compile(r"<action>\s*(\w+)\s*\(([^)]*)\)\s*</action>", re.DOTALL)
+# Patterns to extract tool calls from generated text.
+# Use .*? (lazy) instead of [^)]* so we handle parens inside quoted values.
+ACTION_PATTERN = re.compile(
+    r"<action>\s*(\w+)\s*\((.*?)\)\s*</action>", re.DOTALL
+)
 FUNCTION_CALL_PATTERN = re.compile(
     r'"name"\s*:\s*"(\w+)".*?"arguments"\s*:\s*"?(\{[^}]*\})"?', re.DOTALL
 )
@@ -60,7 +63,11 @@ def extract_tool_calls_from_text(text: str) -> list[dict[str, Any]]:
 
 
 def _parse_args(args_str: str) -> dict[str, Any]:
-    """Parse tool arguments from string."""
+    """Parse tool arguments from key=value string.
+
+    Handles commas inside quoted values, e.g.:
+        query="hotels, restaurants", city="NYC"
+    """
     if not args_str:
         return {}
     # Try JSON first
@@ -68,16 +75,43 @@ def _parse_args(args_str: str) -> dict[str, Any]:
         return json.loads(args_str)
     except (json.JSONDecodeError, ValueError):
         pass
-    # Try key=value pairs
+    # Split by commas that are outside quotes
     args = {}
-    for part in args_str.split(","):
+    parts = _split_args(args_str)
+    for part in parts:
         part = part.strip()
+        if not part:
+            continue
         if "=" in part:
             k, v = part.split("=", 1)
             args[k.strip()] = v.strip().strip("'\"")
         else:
-            args[f"arg_{len(args)}"] = part
+            args[f"arg_{len(args)}"] = part.strip("'\"")
     return args
+
+
+def _split_args(s: str) -> list[str]:
+    """Split comma-separated args respecting quoted strings."""
+    parts: list[str] = []
+    current: list[str] = []
+    in_quote: str | None = None
+
+    for ch in s:
+        if ch in ('"', "'") and in_quote is None:
+            in_quote = ch
+            current.append(ch)
+        elif ch == in_quote:
+            in_quote = None
+            current.append(ch)
+        elif ch == "," and in_quote is None:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+
+    if current:
+        parts.append("".join(current))
+    return parts
 
 
 def _normalize_args(args: dict | str) -> dict:
