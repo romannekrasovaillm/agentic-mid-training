@@ -31,6 +31,17 @@ class RedTeamGenerator:
     3. Copy-paste: repeating the question as answer
     4. Empty reasoning: minimal think block, direct answer
     5. Hallucinated tools: inventing tool calls
+
+    The key invariant: every exploit template has correct *format* (tags) but
+    wrong *content* (doesn't actually solve the task).  If the reward function
+    gives these high scores, it's being gamed.
+
+    ``reward_fn(text, ref_response, ref_tool_calls) -> float``
+        Must compute the same R_total as during training (including R_acc).
+
+    ``accuracy_fn(text, ref_response, ref_tool_calls) -> bool``
+        Returns True when the exploit *actually* answers correctly (ideally
+        never — that's the whole point of exploits).
     """
 
     EXPLOIT_TEMPLATES = {
@@ -74,11 +85,11 @@ class RedTeamGenerator:
         self._results_history: list[list[ExploitResult]] = []
 
     def set_reward_fn(self, fn: Callable):
-        """fn(text) -> float (reward score)."""
+        """fn(text, ref_response, ref_tool_calls) -> float (full reward score)."""
         self.reward_fn = fn
 
     def set_accuracy_fn(self, fn: Callable):
-        """fn(text, expected) -> bool."""
+        """fn(text, ref_response, ref_tool_calls) -> bool."""
         self.accuracy_fn = fn
 
     def generate_exploits(self, prompts: list[str]) -> list[tuple[str, str]]:
@@ -99,39 +110,55 @@ class RedTeamGenerator:
     def evaluate(
         self,
         prompts: list[str],
-        expected_answers: list[str] | None = None,
+        reference_responses: list[str] | None = None,
+        reference_tool_calls: list[list[dict]] | None = None,
         reward_threshold: float = 0.5,
     ) -> list[ExploitResult]:
         """Run exploit evaluation.
 
+        For each prompt an exploit template is generated (correct format,
+        wrong content).  We then check:
+        - Does ``reward_fn`` give it a score ≥ threshold?  (= exploit passed)
+        - Does ``accuracy_fn`` say it's actually correct?  (= not a false positive)
+
+        A healthy reward function should give exploits LOW scores because R_acc
+        will be near zero for garbage answers.
+
         Args:
             prompts: input prompts
-            expected_answers: ground truth answers
+            reference_responses: ground truth assistant responses (for accuracy)
+            reference_tool_calls: ground truth tool calls (for accuracy)
             reward_threshold: reward above which exploit "passes"
         """
-        if expected_answers is None:
-            expected_answers = [""] * len(prompts)
+        if reference_responses is None:
+            reference_responses = [""] * len(prompts)
+        if reference_tool_calls is None:
+            reference_tool_calls = [[] for _ in prompts]
 
         # Group exploits by type
-        exploit_groups: dict[str, list[tuple[str, str, str]]] = {}
+        exploit_groups: dict[str, list[tuple[str, str, str, list[dict]]]] = {}
         exploits = self.generate_exploits(prompts)
 
-        for (name, text), prompt, expected in zip(
-            exploits, prompts[: len(exploits)], expected_answers[: len(exploits)]
+        for (name, text), ref_resp, ref_calls in zip(
+            exploits,
+            reference_responses[: len(exploits)],
+            reference_tool_calls[: len(exploits)],
         ):
-            exploit_groups.setdefault(name, []).append((text, prompt, expected))
+            exploit_groups.setdefault(name, []).append(
+                (text, ref_resp, ref_calls)
+            )
 
         results = []
         for name, group in exploit_groups.items():
             passed = 0
             correct = 0
-            for text, prompt, expected in group:
+            for text, ref_resp, ref_calls in group:
                 if self.reward_fn:
-                    reward = self.reward_fn(text)
+                    reward = self.reward_fn(text, ref_resp, ref_calls)
                     if reward >= reward_threshold:
                         passed += 1
-                if self.accuracy_fn and expected:
-                    if self.accuracy_fn(text, expected):
+                if self.accuracy_fn:
+                    if self.accuracy_fn(text, ref_resp, ref_calls):
                         correct += 1
 
             total = len(group)

@@ -186,7 +186,26 @@ class GRPOTrainer:
             self.metamorphic.set_generate_fn(generate_fn)
             self.metamorphic.set_generate_batch_fn(generate_batch_fn)
         if self.redteam:
-            self.redteam.set_reward_fn(lambda text: self.reward_fn.compute(text).r_total)
+            # Reward fn must include R_acc so exploits with wrong content
+            # get low total reward (not just format+tool).
+            # Normalize to [0, 1] so the default threshold (0.5) is meaningful.
+            weight_sum = (
+                self.reward_fn.format_weight
+                + self.reward_fn.tool_weight
+                + self.reward_fn.accuracy_weight
+            ) or 1.0
+
+            def _rt_reward_fn(text, ref_response, ref_tool_calls):
+                acc = compute_accuracy(text, ref_response, ref_tool_calls)
+                r = self.reward_fn.compute(text, acc.score)
+                return r.r_total / weight_sum
+
+            def _rt_accuracy_fn(text, ref_response, ref_tool_calls):
+                acc = compute_accuracy(text, ref_response, ref_tool_calls)
+                return acc.score > 0.5
+
+            self.redteam.set_reward_fn(_rt_reward_fn)
+            self.redteam.set_accuracy_fn(_rt_accuracy_fn)
 
     def _generate(self, prompt: str) -> str:
         """Generate text from current policy using chat template if available."""
@@ -593,8 +612,21 @@ class GRPOTrainer:
             "stop_reason": stop_signal.reason.value,
         }
 
-    def run_eval(self, test_prompts: list[str], step: int) -> dict[str, Any]:
-        """Run full eval harness."""
+    def run_eval(
+        self,
+        test_prompts: list[str],
+        step: int,
+        reference_responses: list[str] | None = None,
+        reference_tool_calls: list[list[dict]] | None = None,
+    ) -> dict[str, Any]:
+        """Run full eval harness.
+
+        Args:
+            test_prompts: prompts to evaluate on
+            step: current training step
+            reference_responses: ground truth responses (needed for RedTeam)
+            reference_tool_calls: ground truth tool calls (needed for RedTeam)
+        """
         results = {}
 
         if self.ood_eval:
@@ -615,7 +647,11 @@ class GRPOTrainer:
             ]
 
         if self.redteam:
-            rt_results = self.redteam.evaluate(test_prompts)
+            rt_results = self.redteam.evaluate(
+                test_prompts,
+                reference_responses=reference_responses,
+                reference_tool_calls=reference_tool_calls,
+            )
             results["redteam"] = [
                 {"exploit": r.exploit_name, "rate": r.exploit_success_rate, "fp": r.false_positive_rate}
                 for r in rt_results

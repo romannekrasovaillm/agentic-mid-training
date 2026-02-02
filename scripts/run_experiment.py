@@ -561,8 +561,15 @@ def main():
             log.info(f"{'~' * 72}")
             log.info(f"  EVAL at step {step}")
             log.info(f"{'~' * 72}")
-            eval_prompts = [s.prompt for s in eval_samples[:50]]
-            eval_results = trainer.run_eval(eval_prompts, step)
+            eval_slice = eval_samples[:50]
+            eval_prompts = [s.prompt for s in eval_slice]
+            eval_ref_responses = [s.reference_response for s in eval_slice]
+            eval_ref_tool_calls = [s.reference_tool_calls for s in eval_slice]
+            eval_results = trainer.run_eval(
+                eval_prompts, step,
+                reference_responses=eval_ref_responses,
+                reference_tool_calls=eval_ref_tool_calls,
+            )
 
             if "ood" in eval_results:
                 for r in eval_results["ood"]:
